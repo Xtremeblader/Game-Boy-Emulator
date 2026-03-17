@@ -159,13 +159,6 @@ gb_emulatorproj/
 - Performance optimization
 - Support for Game Boy Color (CGB) extensions
 
-## Contributing
-Contributions welcome! Areas with most potential impact:
-- Graphics/PPU completion
-- Additional cartridge type support
-- Audio implementation
-- Bug fixes and optimizations
-
 ## License
 MIT License - See [LICENSE](LICENSE) file for details
 
