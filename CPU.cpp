@@ -1,0 +1,1541 @@
+#include "CPU.h"
+#include <iostream>
+
+CPU::CPU(MMU& mmu_ref) : AF(), BC(), DE(), HL(), PC(0x0100), SP(0xFFFE), IE(0x00), IF(0x00), IME(false), mmu(mmu_ref), ime_scheduled(0){
+    // Assignments for registers
+    AF.reg = 0x01B0;
+    BC.reg = 0x0013;
+    DE.reg = 0x00D8;
+    HL.reg = 0x014D;
+    
+    // Link interrupt registers to MMU for I/O mapping
+    mmu.linkInterruptRegisters(&IE, &IF);
+}
+
+uint8_t CPU::fetchByte(){
+    uint8_t value = mmu.readByte(PC);
+    PC++;
+    return value;
+}
+
+uint16_t CPU::fetchWord(){
+    uint16_t value = mmu.readWord(PC);
+    PC += 2;
+    return value;
+}
+
+int CPU::step(){
+    // Handle EI(Enable Interrupts) 1-cycle delay
+    if(ime_scheduled > 0){
+        ime_scheduled--;
+        if(ime_scheduled == 0){
+            IME = true;
+        }
+    }
+    
+    // Check for interrupts if IME is enabled
+    int interrupt_cycles = checkInterrupts();
+    if(interrupt_cycles > 0){
+        return interrupt_cycles;
+    }
+    
+    // Execute next instruction
+    uint8_t opcode = fetchByte();
+    return execute(opcode);
+}
+
+void CPU::and8bit(uint8_t value){
+    AF.bytes.hi &= value;
+
+    //flag stuff here
+    if(AF.bytes.hi == 0){
+        setFlag(ZERO);
+    } else {
+        clearFlag(ZERO);
+    }
+    clearFlag(SUBTRACT);
+    clearFlag(HALF_CARRY);
+    clearFlag(CARRY);
+}
+
+void CPU::compare(uint8_t value){
+    int result = AF.bytes.hi - value;
+    if(result == 0){
+        setFlag(ZERO);
+    } else {
+        clearFlag(ZERO);
+    }
+    setFlag(SUBTRACT);
+
+    if(((AF.bytes.hi & 0x0F) - (value & 0x0F)) < 0){
+        setFlag(HALF_CARRY);
+    } else {
+        clearFlag(HALF_CARRY);
+    }
+}
+
+// 8-bit Arithmetic Operations
+void CPU::add8(uint8_t& reg, uint8_t value){
+    uint16_t result = (uint16_t)reg + value;
+    
+    // Half-carry: carry from bit 3
+    if(((reg & 0x0F) + (value & 0x0F)) > 0x0F){
+        setFlag(HALF_CARRY);
+    } else {
+        clearFlag(HALF_CARRY);
+    }
+    
+    // Carry: result overflows 8 bits
+    if(result > 0xFF){
+        setFlag(CARRY);
+    } else {
+        clearFlag(CARRY);
+    }
+    
+    reg = (uint8_t)(result & 0xFF);
+    
+    // Zero flag
+    if(reg == 0){
+        setFlag(ZERO);
+    } else {
+        clearFlag(ZERO);
+    }
+    clearFlag(SUBTRACT);
+}
+
+void CPU::adc8(uint8_t& reg, uint8_t value){
+    uint8_t carry = getFlag(CARRY) ? 1 : 0;
+    uint16_t result = (uint16_t)reg + value + carry;
+    
+    if(((reg & 0x0F) + (value & 0x0F) + carry) > 0x0F){
+        setFlag(HALF_CARRY);
+    } else {
+        clearFlag(HALF_CARRY);
+    }
+    
+    if(result > 0xFF){
+        setFlag(CARRY);
+    } else {
+        clearFlag(CARRY);
+    }
+    
+    reg = (uint8_t)(result & 0xFF);
+    
+    if(reg == 0){
+        setFlag(ZERO);
+    } else {
+        clearFlag(ZERO);
+    }
+    clearFlag(SUBTRACT);
+}
+
+void CPU::sub8(uint8_t& reg, uint8_t value){
+    int result = reg - value;
+    
+    if(((reg & 0x0F) - (value & 0x0F)) < 0){
+        setFlag(HALF_CARRY);
+    } else {
+        clearFlag(HALF_CARRY);
+    }
+    
+    if(result < 0){
+        setFlag(CARRY);
+    } else {
+        clearFlag(CARRY);
+    }
+    
+    reg = (uint8_t)(result & 0xFF);
+    
+    if(reg == 0){
+        setFlag(ZERO);
+    } else {
+        clearFlag(ZERO);
+    }
+    setFlag(SUBTRACT);
+}
+
+void CPU::sbc8(uint8_t& reg, uint8_t value){
+    uint8_t carry = getFlag(CARRY) ? 1 : 0;
+    int result = reg - value - carry;
+    
+    if(((reg & 0x0F) - (value & 0x0F) - carry) < 0){
+        setFlag(HALF_CARRY);
+    } else {
+        clearFlag(HALF_CARRY);
+    }
+    
+    if(result < 0){
+        setFlag(CARRY);
+    } else {
+        clearFlag(CARRY);
+    }
+    
+    reg = (uint8_t)(result & 0xFF);
+    
+    if(reg == 0){
+        setFlag(ZERO);
+    } else {
+        clearFlag(ZERO);
+    }
+    setFlag(SUBTRACT);
+}
+
+void CPU::inc8(uint8_t& reg){
+    if((reg & 0x0F) == 0x0F){
+        setFlag(HALF_CARRY);
+    } else {
+        clearFlag(HALF_CARRY);
+    }
+    
+    reg++;
+    
+    if(reg == 0){
+        setFlag(ZERO);
+    } else {
+        clearFlag(ZERO);
+    }
+    clearFlag(SUBTRACT);
+}
+
+void CPU::dec8(uint8_t& reg){
+    if((reg & 0x0F) == 0){
+        setFlag(HALF_CARRY);
+    } else {
+        clearFlag(HALF_CARRY);
+    }
+    
+    reg--;
+    
+    if(reg == 0){
+        setFlag(ZERO);
+    } else {
+        clearFlag(ZERO);
+    }
+    setFlag(SUBTRACT);
+}
+
+// 16-bit Arithmetic Operations
+void CPU::add16(uint16_t& reg_pair, uint16_t value){
+    uint32_t result = (uint32_t)reg_pair + value;
+    
+    // Half-carry: carry from bit 11
+    if(((reg_pair & 0x0FFF) + (value & 0x0FFF)) > 0x0FFF){
+        setFlag(HALF_CARRY);
+    } else {
+        clearFlag(HALF_CARRY);
+    }
+    
+    // Carry: result overflows 16 bits
+    if(result > 0xFFFF){
+        setFlag(CARRY);
+    } else {
+        clearFlag(CARRY);
+    }
+    
+    reg_pair = (uint16_t)(result & 0xFFFF);
+    clearFlag(SUBTRACT);
+}
+
+void CPU::inc16(uint16_t& reg_pair){
+    reg_pair++;
+}
+
+void CPU::dec16(uint16_t& reg_pair){
+    reg_pair--;
+}
+
+// Bitwise Operations
+void CPU::and8(uint8_t& reg, uint8_t value){
+    reg &= value;
+    
+    if(reg == 0){
+        setFlag(ZERO);
+    } else {
+        clearFlag(ZERO);
+    }
+    clearFlag(SUBTRACT);
+    setFlag(HALF_CARRY);
+    clearFlag(CARRY);
+}
+
+void CPU::or8(uint8_t& reg, uint8_t value){
+    reg |= value;
+    
+    if(reg == 0){
+        setFlag(ZERO);
+    } else {
+        clearFlag(ZERO);
+    }
+    clearFlag(SUBTRACT);
+    clearFlag(HALF_CARRY);
+    clearFlag(CARRY);
+}
+
+void CPU::xor8(uint8_t& reg, uint8_t value){
+    reg ^= value;
+    
+    if(reg == 0){
+        setFlag(ZERO);
+    } else {
+        clearFlag(ZERO);
+    }
+    clearFlag(SUBTRACT);
+    clearFlag(HALF_CARRY);
+    clearFlag(CARRY);
+}
+
+// Rotation Operations
+void CPU::rlc(uint8_t& reg){
+    uint8_t msb = (reg >> 7) & 1;
+    reg = (reg << 1) | msb;
+    
+    if(msb){
+        setFlag(CARRY);
+    } else {
+        clearFlag(CARRY);
+    }
+    
+    if(reg == 0){
+        setFlag(ZERO);
+    } else {
+        clearFlag(ZERO);
+    }
+    clearFlag(SUBTRACT);
+    clearFlag(HALF_CARRY);
+}
+
+void CPU::rrc(uint8_t& reg){
+    uint8_t lsb = reg & 1;
+    reg = (reg >> 1) | (lsb << 7);
+    
+    if(lsb){
+        setFlag(CARRY);
+    } else {
+        clearFlag(CARRY);
+    }
+    
+    if(reg == 0){
+        setFlag(ZERO);
+    } else {
+        clearFlag(ZERO);
+    }
+    clearFlag(SUBTRACT);
+    clearFlag(HALF_CARRY);
+}
+
+void CPU::rl(uint8_t& reg){
+    uint8_t msb = (reg >> 7) & 1;
+    uint8_t old_carry = getFlag(CARRY) ? 1 : 0;
+    reg = (reg << 1) | old_carry;
+    
+    if(msb){
+        setFlag(CARRY);
+    } else {
+        clearFlag(CARRY);
+    }
+    
+    if(reg == 0){
+        setFlag(ZERO);
+    } else {
+        clearFlag(ZERO);
+    }
+    clearFlag(SUBTRACT);
+    clearFlag(HALF_CARRY);
+}
+
+void CPU::rr(uint8_t& reg){
+    uint8_t lsb = reg & 1;
+    uint8_t old_carry = getFlag(CARRY) ? 1 : 0;
+    reg = (reg >> 1) | (old_carry << 7);
+    
+    if(lsb){
+        setFlag(CARRY);
+    } else {
+        clearFlag(CARRY);
+    }
+    
+    if(reg == 0){
+        setFlag(ZERO);
+    } else {
+        clearFlag(ZERO);
+    }
+    clearFlag(SUBTRACT);
+    clearFlag(HALF_CARRY);
+}
+
+// Shift Operations
+void CPU::sla(uint8_t& reg){
+    uint8_t msb = (reg >> 7) & 1;
+    reg = reg << 1;
+    
+    if(msb){
+        setFlag(CARRY);
+    } else {
+        clearFlag(CARRY);
+    }
+    
+    if(reg == 0){
+        setFlag(ZERO);
+    } else {
+        clearFlag(ZERO);
+    }
+    clearFlag(SUBTRACT);
+    clearFlag(HALF_CARRY);
+}
+
+void CPU::sra(uint8_t& reg){
+    uint8_t lsb = reg & 1;
+    uint8_t msb = (reg >> 7) & 1;
+    reg = (reg >> 1) | (msb << 7);
+    
+    if(lsb){
+        setFlag(CARRY);
+    } else {
+        clearFlag(CARRY);
+    }
+    
+    if(reg == 0){
+        setFlag(ZERO);
+    } else {
+        clearFlag(ZERO);
+    }
+    clearFlag(SUBTRACT);
+    clearFlag(HALF_CARRY);
+}
+
+void CPU::srl(uint8_t& reg){
+    uint8_t lsb = reg & 1;
+    reg = reg >> 1;
+    
+    if(lsb){
+        setFlag(CARRY);
+    } else {
+        clearFlag(CARRY);
+    }
+    
+    if(reg == 0){
+        setFlag(ZERO);
+    } else {
+        clearFlag(ZERO);
+    }
+    clearFlag(SUBTRACT);
+    clearFlag(HALF_CARRY);
+}
+
+void CPU::swap(uint8_t& reg){
+    uint8_t lo_nibble = reg & 0x0F;
+    uint8_t hi_nibble = (reg >> 4) & 0x0F;
+    reg = (lo_nibble << 4) | hi_nibble;
+    
+    if(reg == 0){
+        setFlag(ZERO);
+    } else {
+        clearFlag(ZERO);
+    }
+    clearFlag(SUBTRACT);
+    clearFlag(HALF_CARRY);
+    clearFlag(CARRY);
+}
+
+// Bit Operations
+void CPU::bit(uint8_t value, int bit_pos){
+    if((value & (1 << bit_pos)) == 0){
+        setFlag(ZERO);
+    } else {
+        clearFlag(ZERO);
+    }
+    clearFlag(SUBTRACT);
+    setFlag(HALF_CARRY);
+}
+
+void CPU::set(uint8_t& value, int bit_pos){
+    value |= (1 << bit_pos);
+}
+
+void CPU::res(uint8_t& value, int bit_pos){
+    value &= ~(1 << bit_pos);
+}
+
+// A-specific Rotations(clears Z flag, unlike CB versions)
+void CPU::rlca(){
+    uint8_t msb = (AF.bytes.hi >> 7) & 1;
+    AF.bytes.hi = (AF.bytes.hi << 1) | msb;
+    
+    if(msb){
+        setFlag(CARRY);
+    } else {
+        clearFlag(CARRY);
+    }
+    clearFlag(ZERO);
+    clearFlag(SUBTRACT);
+    clearFlag(HALF_CARRY);
+}
+
+void CPU::rrca(){
+    uint8_t lsb = AF.bytes.hi & 1;
+    AF.bytes.hi = (AF.bytes.hi >> 1) | (lsb << 7);
+    
+    if(lsb){
+        setFlag(CARRY);
+    } else {
+        clearFlag(CARRY);
+    }
+    clearFlag(ZERO);
+    clearFlag(SUBTRACT);
+    clearFlag(HALF_CARRY);
+}
+
+void CPU::rla(){
+    uint8_t msb = (AF.bytes.hi >> 7) & 1;
+    uint8_t old_carry = getFlag(CARRY) ? 1 : 0;
+    AF.bytes.hi = (AF.bytes.hi << 1) | old_carry;
+    
+    if(msb){
+        setFlag(CARRY);
+    } else {
+        clearFlag(CARRY);
+    }
+    clearFlag(ZERO);
+    clearFlag(SUBTRACT);
+    clearFlag(HALF_CARRY);
+}
+
+void CPU::rra(){
+    uint8_t lsb = AF.bytes.hi & 1;
+    uint8_t old_carry = getFlag(CARRY) ? 1 : 0;
+    AF.bytes.hi = (AF.bytes.hi >> 1) | (old_carry << 7);
+    
+    if(lsb){
+        setFlag(CARRY);
+    } else {
+        clearFlag(CARRY);
+    }
+    clearFlag(ZERO);
+    clearFlag(SUBTRACT);
+    clearFlag(HALF_CARRY);
+}
+
+// Flag Operations
+void CPU::cpl(){
+    AF.bytes.hi ^= 0xFF;  // Flip all bits
+    setFlag(SUBTRACT);
+    setFlag(HALF_CARRY);
+}
+
+void CPU::scf(){
+    setFlag(CARRY);
+    clearFlag(SUBTRACT);
+    clearFlag(HALF_CARRY);
+}
+
+void CPU::ccf(){
+    if(getFlag(CARRY)){
+        clearFlag(CARRY);
+    } else {
+        setFlag(CARRY);
+    }
+    clearFlag(SUBTRACT);
+    clearFlag(HALF_CARRY);
+}
+
+void CPU::daa(){
+    // Decimal adjust after BCD arithmetic
+    uint8_t correction = 0;
+    bool carry = false;
+    
+    if(getFlag(HALF_CARRY) || (AF.bytes.hi & 0x0F) > 0x09){
+        correction |= 0x06;
+    }
+    
+    if(getFlag(CARRY) || AF.bytes.hi > 0x99){
+        correction |= 0x60;
+        carry = true;
+    }
+    
+    if(getFlag(SUBTRACT)){
+        AF.bytes.hi -= correction;
+    } else {
+        AF.bytes.hi += correction;
+    }
+    
+    if(carry){
+        setFlag(CARRY);
+    } else {
+        clearFlag(CARRY);
+    }
+    
+    if(AF.bytes.hi == 0){
+        setFlag(ZERO);
+    } else {
+        clearFlag(ZERO);
+    }
+    
+    clearFlag(HALF_CARRY);
+}
+
+// Stack Operations
+void CPU::pushWord(uint16_t value){
+    SP -= 2;
+    mmu.writeWord(SP, value);
+}
+
+uint16_t CPU::popWord(){
+    uint16_t value = mmu.readWord(SP);
+    SP += 2;
+    return value;
+}
+
+// Interrupt Handling
+int CPU::checkInterrupts(){
+    if(!IME){
+        return 0;  // Interrupts disabled
+    }
+    
+    // Check each interrupt in priority order
+    for(int i = 0; i < 5; i++){
+        // Check if both IE and IF have this bit set
+        if((IE & (1 << i)) && (IF & (1 << i))){
+            serviceInterrupt(static_cast<InterruptType>(i));
+            return 20;  // Interrupt takes 20 cycles
+        }
+    }
+    
+    return 0;  // No interrupts to service
+}
+
+void CPU::serviceInterrupt(InterruptType type){
+    // Disable interrupts while servicing
+    IME = false;
+    
+    // Clear the interrupt flag
+    IF &= ~(1 << type);
+    
+    // Push current PC onto stack
+    pushWord(PC);
+    
+    // Jump to interrupt vector
+    PC = INTERRUPT_VECTORS[type];
+}
+
+// Interrupt Control
+void CPU::enableInterrupts(){
+    ime_scheduled = 1;
+}
+
+void CPU::disableInterrupts(){
+    IME = false;
+    ime_scheduled = 0;
+}
+
+// Instructions CB-prefixed
+int CPU::executeCB(uint8_t opcode){
+    switch(opcode){
+        // RLC(Rotate Left Circular) (0x00-0x07)
+        case 0x00: rlc(BC.bytes.hi); return 8;           // RLC B
+        case 0x01: rlc(BC.bytes.lo); return 8;           // RLC C
+        case 0x02: rlc(DE.bytes.hi); return 8;           // RLC D
+        case 0x03: rlc(DE.bytes.lo); return 8;           // RLC E
+        case 0x04: rlc(HL.bytes.hi); return 8;           // RLC H
+        case 0x05: rlc(HL.bytes.lo); return 8;           // RLC L
+        case 0x06:{
+            uint8_t value = mmu.readByte(HL.reg);
+            rlc(value);
+            mmu.writeByte(HL.reg, value);
+            return 16;
+        }
+        case 0x07: rlc(AF.bytes.hi); return 8;           // RLC A
+        
+        // RRC(Rotate Right Circular) (0x08-0x0F)
+        case 0x08: rrc(BC.bytes.hi); return 8;           // RRC B
+        case 0x09: rrc(BC.bytes.lo); return 8;           // RRC C
+        case 0x0A: rrc(DE.bytes.hi); return 8;           // RRC D
+        case 0x0B: rrc(DE.bytes.lo); return 8;           // RRC E
+        case 0x0C: rrc(HL.bytes.hi); return 8;           // RRC H
+        case 0x0D: rrc(HL.bytes.lo); return 8;           // RRC L
+        case 0x0E:{
+            uint8_t value = mmu.readByte(HL.reg);
+            rrc(value);
+            mmu.writeByte(HL.reg, value);
+            return 16;
+        }
+        case 0x0F: rrc(AF.bytes.hi); return 8;           // RRC A
+        
+        // RL(Rotate Left through Carry) (0x10-0x17)
+        case 0x10: rl(BC.bytes.hi); return 8;            // RL B
+        case 0x11: rl(BC.bytes.lo); return 8;            // RL C
+        case 0x12: rl(DE.bytes.hi); return 8;            // RL D
+        case 0x13: rl(DE.bytes.lo); return 8;            // RL E
+        case 0x14: rl(HL.bytes.hi); return 8;            // RL H
+        case 0x15: rl(HL.bytes.lo); return 8;            // RL L
+        case 0x16:{
+            uint8_t value = mmu.readByte(HL.reg);
+            rl(value);
+            mmu.writeByte(HL.reg, value);
+            return 16;
+        }
+        case 0x17: rl(AF.bytes.hi); return 8;            // RL A
+        
+        // RR(Rotate Right through Carry) (0x18-0x1F)
+        case 0x18: rr(BC.bytes.hi); return 8;            // RR B
+        case 0x19: rr(BC.bytes.lo); return 8;            // RR C
+        case 0x1A: rr(DE.bytes.hi); return 8;            // RR D
+        case 0x1B: rr(DE.bytes.lo); return 8;            // RR E
+        case 0x1C: rr(HL.bytes.hi); return 8;            // RR H
+        case 0x1D: rr(HL.bytes.lo); return 8;            // RR L
+        case 0x1E:{
+            uint8_t value = mmu.readByte(HL.reg);
+            rr(value);
+            mmu.writeByte(HL.reg, value);
+            return 16;
+        }
+        case 0x1F: rr(AF.bytes.hi); return 8;            // RR A
+        
+        // SLA(Shift Left Arithmetic) (0x20-0x27)
+        case 0x20: sla(BC.bytes.hi); return 8;           // SLA B
+        case 0x21: sla(BC.bytes.lo); return 8;           // SLA C
+        case 0x22: sla(DE.bytes.hi); return 8;           // SLA D
+        case 0x23: sla(DE.bytes.lo); return 8;           // SLA E
+        case 0x24: sla(HL.bytes.hi); return 8;           // SLA H
+        case 0x25: sla(HL.bytes.lo); return 8;           // SLA L
+        case 0x26:{
+            uint8_t value = mmu.readByte(HL.reg);
+            sla(value);
+            mmu.writeByte(HL.reg, value);
+            return 16;
+        }
+        case 0x27: sla(AF.bytes.hi); return 8;           // SLA A
+        
+        // SRA(Shift Right Arithmetic) (0x28-0x2F)
+        case 0x28: sra(BC.bytes.hi); return 8;           // SRA B
+        case 0x29: sra(BC.bytes.lo); return 8;           // SRA C
+        case 0x2A: sra(DE.bytes.hi); return 8;           // SRA D
+        case 0x2B: sra(DE.bytes.lo); return 8;           // SRA E
+        case 0x2C: sra(HL.bytes.hi); return 8;           // SRA H
+        case 0x2D: sra(HL.bytes.lo); return 8;           // SRA L
+        case 0x2E:{
+            uint8_t value = mmu.readByte(HL.reg);
+            sra(value);
+            mmu.writeByte(HL.reg, value);
+            return 16;
+        }
+        case 0x2F: sra(AF.bytes.hi); return 8;           // SRA A
+        
+        // SWAP(0x30-0x37)
+        case 0x30: swap(BC.bytes.hi); return 8;          // SWAP B
+        case 0x31: swap(BC.bytes.lo); return 8;          // SWAP C
+        case 0x32: swap(DE.bytes.hi); return 8;          // SWAP D
+        case 0x33: swap(DE.bytes.lo); return 8;          // SWAP E
+        case 0x34: swap(HL.bytes.hi); return 8;          // SWAP H
+        case 0x35: swap(HL.bytes.lo); return 8;          // SWAP L
+        case 0x36:{
+            uint8_t value = mmu.readByte(HL.reg);
+            swap(value);
+            mmu.writeByte(HL.reg, value);
+            return 16;
+        }
+        case 0x37: swap(AF.bytes.hi); return 8;          // SWAP A
+        
+        // SRL(Shift Right Logical) (0x38-0x3F)
+        case 0x38: srl(BC.bytes.hi); return 8;           // SRL B
+        case 0x39: srl(BC.bytes.lo); return 8;           // SRL C
+        case 0x3A: srl(DE.bytes.hi); return 8;           // SRL D
+        case 0x3B: srl(DE.bytes.lo); return 8;           // SRL E
+        case 0x3C: srl(HL.bytes.hi); return 8;           // SRL H
+        case 0x3D: srl(HL.bytes.lo); return 8;           // SRL L
+        case 0x3E:{
+            uint8_t value = mmu.readByte(HL.reg);
+            srl(value);
+            mmu.writeByte(HL.reg, value);
+            return 16;
+        }
+        case 0x3F: srl(AF.bytes.hi); return 8;           // SRL A
+        
+        // BIT(Test Bit) (0x40-0x7F)
+        // BIT 0,x(0x40-0x47)
+        case 0x40: bit(BC.bytes.hi, 0); return 8;        // BIT 0,B
+        case 0x41: bit(BC.bytes.lo, 0); return 8;        // BIT 0,C
+        case 0x42: bit(DE.bytes.hi, 0); return 8;        // BIT 0,D
+        case 0x43: bit(DE.bytes.lo, 0); return 8;        // BIT 0,E
+        case 0x44: bit(HL.bytes.hi, 0); return 8;        // BIT 0,H
+        case 0x45: bit(HL.bytes.lo, 0); return 8;        // BIT 0,L
+        case 0x46: bit(mmu.readByte(HL.reg), 0); return 12;  // BIT 0,(HL)
+        case 0x47: bit(AF.bytes.hi, 0); return 8;        // BIT 0,A
+        
+        // BIT 1,x(0x48-0x4F)
+        case 0x48: bit(BC.bytes.hi, 1); return 8;        // BIT 1,B
+        case 0x49: bit(BC.bytes.lo, 1); return 8;        // BIT 1,C
+        case 0x4A: bit(DE.bytes.hi, 1); return 8;        // BIT 1,D
+        case 0x4B: bit(DE.bytes.lo, 1); return 8;        // BIT 1,E
+        case 0x4C: bit(HL.bytes.hi, 1); return 8;        // BIT 1,H
+        case 0x4D: bit(HL.bytes.lo, 1); return 8;        // BIT 1,L
+        case 0x4E: bit(mmu.readByte(HL.reg), 1); return 12;  // BIT 1,(HL)
+        case 0x4F: bit(AF.bytes.hi, 1); return 8;        // BIT 1,A
+        
+        // BIT 2,x(0x50-0x57)
+        case 0x50: bit(BC.bytes.hi, 2); return 8;        // BIT 2,B
+        case 0x51: bit(BC.bytes.lo, 2); return 8;        // BIT 2,C
+        case 0x52: bit(DE.bytes.hi, 2); return 8;        // BIT 2,D
+        case 0x53: bit(DE.bytes.lo, 2); return 8;        // BIT 2,E
+        case 0x54: bit(HL.bytes.hi, 2); return 8;        // BIT 2,H
+        case 0x55: bit(HL.bytes.lo, 2); return 8;        // BIT 2,L
+        case 0x56: bit(mmu.readByte(HL.reg), 2); return 12;  // BIT 2,(HL)
+        case 0x57: bit(AF.bytes.hi, 2); return 8;        // BIT 2,A
+        
+        // BIT 3,x(0x58-0x5F)
+        case 0x58: bit(BC.bytes.hi, 3); return 8;        // BIT 3,B
+        case 0x59: bit(BC.bytes.lo, 3); return 8;        // BIT 3,C
+        case 0x5A: bit(DE.bytes.hi, 3); return 8;        // BIT 3,D
+        case 0x5B: bit(DE.bytes.lo, 3); return 8;        // BIT 3,E
+        case 0x5C: bit(HL.bytes.hi, 3); return 8;        // BIT 3,H
+        case 0x5D: bit(HL.bytes.lo, 3); return 8;        // BIT 3,L
+        case 0x5E: bit(mmu.readByte(HL.reg), 3); return 12;  // BIT 3,(HL)
+        case 0x5F: bit(AF.bytes.hi, 3); return 8;        // BIT 3,A
+        
+        // BIT 4,x(0x60-0x67)
+        case 0x60: bit(BC.bytes.hi, 4); return 8;        // BIT 4,B
+        case 0x61: bit(BC.bytes.lo, 4); return 8;        // BIT 4,C
+        case 0x62: bit(DE.bytes.hi, 4); return 8;        // BIT 4,D
+        case 0x63: bit(DE.bytes.lo, 4); return 8;        // BIT 4,E
+        case 0x64: bit(HL.bytes.hi, 4); return 8;        // BIT 4,H
+        case 0x65: bit(HL.bytes.lo, 4); return 8;        // BIT 4,L
+        case 0x66: bit(mmu.readByte(HL.reg), 4); return 12;  // BIT 4,(HL)
+        case 0x67: bit(AF.bytes.hi, 4); return 8;        // BIT 4,A
+        
+        // BIT 5,x(0x68-0x6F)
+        case 0x68: bit(BC.bytes.hi, 5); return 8;        // BIT 5,B
+        case 0x69: bit(BC.bytes.lo, 5); return 8;        // BIT 5,C
+        case 0x6A: bit(DE.bytes.hi, 5); return 8;        // BIT 5,D
+        case 0x6B: bit(DE.bytes.lo, 5); return 8;        // BIT 5,E
+        case 0x6C: bit(HL.bytes.hi, 5); return 8;        // BIT 5,H
+        case 0x6D: bit(HL.bytes.lo, 5); return 8;        // BIT 5,L
+        case 0x6E: bit(mmu.readByte(HL.reg), 5); return 12;  // BIT 5,(HL)
+        case 0x6F: bit(AF.bytes.hi, 5); return 8;        // BIT 5,A
+        
+        // BIT 6,x(0x70-0x77)
+        case 0x70: bit(BC.bytes.hi, 6); return 8;        // BIT 6,B
+        case 0x71: bit(BC.bytes.lo, 6); return 8;        // BIT 6,C
+        case 0x72: bit(DE.bytes.hi, 6); return 8;        // BIT 6,D
+        case 0x73: bit(DE.bytes.lo, 6); return 8;        // BIT 6,E
+        case 0x74: bit(HL.bytes.hi, 6); return 8;        // BIT 6,H
+        case 0x75: bit(HL.bytes.lo, 6); return 8;        // BIT 6,L
+        case 0x76: bit(mmu.readByte(HL.reg), 6); return 12;  // BIT 6,(HL)
+        case 0x77: bit(AF.bytes.hi, 6); return 8;        // BIT 6,A
+        
+        // BIT 7,x(0x78-0x7F)
+        case 0x78: bit(BC.bytes.hi, 7); return 8;        // BIT 7,B
+        case 0x79: bit(BC.bytes.lo, 7); return 8;        // BIT 7,C
+        case 0x7A: bit(DE.bytes.hi, 7); return 8;        // BIT 7,D
+        case 0x7B: bit(DE.bytes.lo, 7); return 8;        // BIT 7,E
+        case 0x7C: bit(HL.bytes.hi, 7); return 8;        // BIT 7,H
+        case 0x7D: bit(HL.bytes.lo, 7); return 8;        // BIT 7,L
+        case 0x7E: bit(mmu.readByte(HL.reg), 7); return 12;  // BIT 7,(HL)
+        case 0x7F: bit(AF.bytes.hi, 7); return 8;        // BIT 7,A
+        
+        // RES(Reset Bit) (0x80-0xBF)
+        // RES 0,x(0x80-0x87)
+        case 0x80: res(BC.bytes.hi, 0); return 8;        // RES 0,B
+        case 0x81: res(BC.bytes.lo, 0); return 8;        // RES 0,C
+        case 0x82: res(DE.bytes.hi, 0); return 8;        // RES 0,D
+        case 0x83: res(DE.bytes.lo, 0); return 8;        // RES 0,E
+        case 0x84: res(HL.bytes.hi, 0); return 8;        // RES 0,H
+        case 0x85: res(HL.bytes.lo, 0); return 8;        // RES 0,L
+        case 0x86: {                                      // RES 0,(HL)
+            uint8_t value = mmu.readByte(HL.reg);
+            res(value, 0);
+            mmu.writeByte(HL.reg, value);
+            return 16;
+        }
+        case 0x87: res(AF.bytes.hi, 0); return 8;        // RES 0,A
+        
+        // RES 1,x(0x88-0x8F)
+        case 0x88: res(BC.bytes.hi, 1); return 8;        // RES 1,B
+        case 0x89: res(BC.bytes.lo, 1); return 8;        // RES 1,C
+        case 0x8A: res(DE.bytes.hi, 1); return 8;        // RES 1,D
+        case 0x8B: res(DE.bytes.lo, 1); return 8;        // RES 1,E
+        case 0x8C: res(HL.bytes.hi, 1); return 8;        // RES 1,H
+        case 0x8D: res(HL.bytes.lo, 1); return 8;        // RES 1,L
+        case 0x8E:{
+            uint8_t value = mmu.readByte(HL.reg);
+            res(value, 1);
+            mmu.writeByte(HL.reg, value);
+            return 16;
+        }
+        case 0x8F: res(AF.bytes.hi, 1); return 8;        // RES 1,A
+        
+        // RES 2,x(0x90-0x97)
+        case 0x90: res(BC.bytes.hi, 2); return 8;        // RES 2,B
+        case 0x91: res(BC.bytes.lo, 2); return 8;        // RES 2,C
+        case 0x92: res(DE.bytes.hi, 2); return 8;        // RES 2,D
+        case 0x93: res(DE.bytes.lo, 2); return 8;        // RES 2,E
+        case 0x94: res(HL.bytes.hi, 2); return 8;        // RES 2,H
+        case 0x95: res(HL.bytes.lo, 2); return 8;        // RES 2,L
+        case 0x96:{
+            uint8_t value = mmu.readByte(HL.reg);
+            res(value, 2);
+            mmu.writeByte(HL.reg, value);
+            return 16;
+        }
+        case 0x97: res(AF.bytes.hi, 2); return 8;        // RES 2,A
+        
+        // RES 3,x(0x98-0x9F)
+        case 0x98: res(BC.bytes.hi, 3); return 8;        // RES 3,B
+        case 0x99: res(BC.bytes.lo, 3); return 8;        // RES 3,C
+        case 0x9A: res(DE.bytes.hi, 3); return 8;        // RES 3,D
+        case 0x9B: res(DE.bytes.lo, 3); return 8;        // RES 3,E
+        case 0x9C: res(HL.bytes.hi, 3); return 8;        // RES 3,H
+        case 0x9D: res(HL.bytes.lo, 3); return 8;        // RES 3,L
+        case 0x9E:{
+            uint8_t value = mmu.readByte(HL.reg);
+            res(value, 3);
+            mmu.writeByte(HL.reg, value);
+            return 16;
+        }
+        case 0x9F: res(AF.bytes.hi, 3); return 8;        // RES 3,A
+        
+        // RES 4,x(0xA0-0xA7)
+        case 0xA0: res(BC.bytes.hi, 4); return 8;        // RES 4,B
+        case 0xA1: res(BC.bytes.lo, 4); return 8;        // RES 4,C
+        case 0xA2: res(DE.bytes.hi, 4); return 8;        // RES 4,D
+        case 0xA3: res(DE.bytes.lo, 4); return 8;        // RES 4,E
+        case 0xA4: res(HL.bytes.hi, 4); return 8;        // RES 4,H
+        case 0xA5: res(HL.bytes.lo, 4); return 8;        // RES 4,L
+        case 0xA6:{
+            uint8_t value = mmu.readByte(HL.reg);
+            res(value, 4);
+            mmu.writeByte(HL.reg, value);
+            return 16;
+        }
+        case 0xA7: res(AF.bytes.hi, 4); return 8;        // RES 4,A
+        
+        // RES 5,x(0xA8-0xAF)
+        case 0xA8: res(BC.bytes.hi, 5); return 8;        // RES 5,B
+        case 0xA9: res(BC.bytes.lo, 5); return 8;        // RES 5,C
+        case 0xAA: res(DE.bytes.hi, 5); return 8;        // RES 5,D
+        case 0xAB: res(DE.bytes.lo, 5); return 8;        // RES 5,E
+        case 0xAC: res(HL.bytes.hi, 5); return 8;        // RES 5,H
+        case 0xAD: res(HL.bytes.lo, 5); return 8;        // RES 5,L
+        case 0xAE:{
+            uint8_t value = mmu.readByte(HL.reg);
+            res(value, 5);
+            mmu.writeByte(HL.reg, value);
+            return 16;
+        }
+        case 0xAF: res(AF.bytes.hi, 5); return 8;        // RES 5,A
+        
+        // RES 6,x(0xB0-0xB7)
+        case 0xB0: res(BC.bytes.hi, 6); return 8;        // RES 6,B
+        case 0xB1: res(BC.bytes.lo, 6); return 8;        // RES 6,C
+        case 0xB2: res(DE.bytes.hi, 6); return 8;        // RES 6,D
+        case 0xB3: res(DE.bytes.lo, 6); return 8;        // RES 6,E
+        case 0xB4: res(HL.bytes.hi, 6); return 8;        // RES 6,H
+        case 0xB5: res(HL.bytes.lo, 6); return 8;        // RES 6,L
+        case 0xB6:{
+            uint8_t value = mmu.readByte(HL.reg);
+            res(value, 6);
+            mmu.writeByte(HL.reg, value);
+            return 16;
+        }
+        case 0xB7: res(AF.bytes.hi, 6); return 8;        // RES 6,A
+        
+        // RES 7,x(0xB8-0xBF)
+        case 0xB8: res(BC.bytes.hi, 7); return 8;        // RES 7,B
+        case 0xB9: res(BC.bytes.lo, 7); return 8;        // RES 7,C
+        case 0xBA: res(DE.bytes.hi, 7); return 8;        // RES 7,D
+        case 0xBB: res(DE.bytes.lo, 7); return 8;        // RES 7,E
+        case 0xBC: res(HL.bytes.hi, 7); return 8;        // RES 7,H
+        case 0xBD: res(HL.bytes.lo, 7); return 8;        // RES 7,L
+        case 0xBE:{
+            uint8_t value = mmu.readByte(HL.reg);
+            res(value, 7);
+            mmu.writeByte(HL.reg, value);
+            return 16;
+        }
+        case 0xBF: res(AF.bytes.hi, 7); return 8;        // RES 7,A
+        
+        // SET(Set Bit) (0xC0-0xFF)
+        // SET 0,x(0xC0-0xC7)
+        case 0xC0: set(BC.bytes.hi, 0); return 8;        // SET 0,B
+        case 0xC1: set(BC.bytes.lo, 0); return 8;        // SET 0,C
+        case 0xC2: set(DE.bytes.hi, 0); return 8;        // SET 0,D
+        case 0xC3: set(DE.bytes.lo, 0); return 8;        // SET 0,E
+        case 0xC4: set(HL.bytes.hi, 0); return 8;        // SET 0,H
+        case 0xC5: set(HL.bytes.lo, 0); return 8;        // SET 0,L
+        case 0xC6:{
+            uint8_t value = mmu.readByte(HL.reg);
+            set(value, 0);
+            mmu.writeByte(HL.reg, value);
+            return 16;
+        }
+        case 0xC7: set(AF.bytes.hi, 0); return 8;        // SET 0,A
+        
+        // SET 1,x(0xC8-0xCF)
+        case 0xC8: set(BC.bytes.hi, 1); return 8;        // SET 1,B
+        case 0xC9: set(BC.bytes.lo, 1); return 8;        // SET 1,C
+        case 0xCA: set(DE.bytes.hi, 1); return 8;        // SET 1,D
+        case 0xCB: set(DE.bytes.lo, 1); return 8;        // SET 1,E
+        case 0xCC: set(HL.bytes.hi, 1); return 8;        // SET 1,H
+        case 0xCD: set(HL.bytes.lo, 1); return 8;        // SET 1,L
+        case 0xCE:{
+            uint8_t value = mmu.readByte(HL.reg);
+            set(value, 1);
+            mmu.writeByte(HL.reg, value);
+            return 16;
+        }
+        case 0xCF: set(AF.bytes.hi, 1); return 8;        // SET 1,A
+        
+        // SET 2,x(0xD0-0xD7)
+        case 0xD0: set(BC.bytes.hi, 2); return 8;        // SET 2,B
+        case 0xD1: set(BC.bytes.lo, 2); return 8;        // SET 2,C
+        case 0xD2: set(DE.bytes.hi, 2); return 8;        // SET 2,D
+        case 0xD3: set(DE.bytes.lo, 2); return 8;        // SET 2,E
+        case 0xD4: set(HL.bytes.hi, 2); return 8;        // SET 2,H
+        case 0xD5: set(HL.bytes.lo, 2); return 8;        // SET 2,L
+        case 0xD6:{
+            uint8_t value = mmu.readByte(HL.reg);
+            set(value, 2);
+            mmu.writeByte(HL.reg, value);
+            return 16;
+        }
+        case 0xD7: set(AF.bytes.hi, 2); return 8;        // SET 2,A
+        
+        // SET 3,x(0xD8-0xDF)
+        case 0xD8: set(BC.bytes.hi, 3); return 8;        // SET 3,B
+        case 0xD9: set(BC.bytes.lo, 3); return 8;        // SET 3,C
+        case 0xDA: set(DE.bytes.hi, 3); return 8;        // SET 3,D
+        case 0xDB: set(DE.bytes.lo, 3); return 8;        // SET 3,E
+        case 0xDC: set(HL.bytes.hi, 3); return 8;        // SET 3,H
+        case 0xDD: set(HL.bytes.lo, 3); return 8;        // SET 3,L
+        case 0xDE:{
+            uint8_t value = mmu.readByte(HL.reg);
+            set(value, 3);
+            mmu.writeByte(HL.reg, value);
+            return 16;
+        }
+        case 0xDF: set(AF.bytes.hi, 3); return 8;        // SET 3,A
+        
+        // SET 4,x(0xE0-0xE7)
+        case 0xE0: set(BC.bytes.hi, 4); return 8;        // SET 4,B
+        case 0xE1: set(BC.bytes.lo, 4); return 8;        // SET 4,C
+        case 0xE2: set(DE.bytes.hi, 4); return 8;        // SET 4,D
+        case 0xE3: set(DE.bytes.lo, 4); return 8;        // SET 4,E
+        case 0xE4: set(HL.bytes.hi, 4); return 8;        // SET 4,H
+        case 0xE5: set(HL.bytes.lo, 4); return 8;        // SET 4,L
+        case 0xE6:{
+            uint8_t value = mmu.readByte(HL.reg);
+            set(value, 4);
+            mmu.writeByte(HL.reg, value);
+            return 16;
+        }
+        case 0xE7: set(AF.bytes.hi, 4); return 8;        // SET 4,A
+        
+        // SET 5,x(0xE8-0xEF)
+        case 0xE8: set(BC.bytes.hi, 5); return 8;        // SET 5,B
+        case 0xE9: set(BC.bytes.lo, 5); return 8;        // SET 5,C
+        case 0xEA: set(DE.bytes.hi, 5); return 8;        // SET 5,D
+        case 0xEB: set(DE.bytes.lo, 5); return 8;        // SET 5,E
+        case 0xEC: set(HL.bytes.hi, 5); return 8;        // SET 5,H
+        case 0xED: set(HL.bytes.lo, 5); return 8;        // SET 5,L
+        case 0xEE:{
+            uint8_t value = mmu.readByte(HL.reg);
+            set(value, 5);
+            mmu.writeByte(HL.reg, value);
+            return 16;
+        }
+        case 0xEF: set(AF.bytes.hi, 5); return 8;        // SET 5,A
+        
+        // SET 6,x(0xF0-0xF7)
+        case 0xF0: set(BC.bytes.hi, 6); return 8;        // SET 6,B
+        case 0xF1: set(BC.bytes.lo, 6); return 8;        // SET 6,C
+        case 0xF2: set(DE.bytes.hi, 6); return 8;        // SET 6,D
+        case 0xF3: set(DE.bytes.lo, 6); return 8;        // SET 6,E
+        case 0xF4: set(HL.bytes.hi, 6); return 8;        // SET 6,H
+        case 0xF5: set(HL.bytes.lo, 6); return 8;        // SET 6,L
+        case 0xF6:{
+            uint8_t value = mmu.readByte(HL.reg);
+            set(value, 6);
+            mmu.writeByte(HL.reg, value);
+            return 16;
+        }
+        case 0xF7: set(AF.bytes.hi, 6); return 8;        // SET 6,A
+        
+        // SET 7,x(0xF8-0xFF)
+        case 0xF8: set(BC.bytes.hi, 7); return 8;        // SET 7,B
+        case 0xF9: set(BC.bytes.lo, 7); return 8;        // SET 7,C
+        case 0xFA: set(DE.bytes.hi, 7); return 8;        // SET 7,D
+        case 0xFB: set(DE.bytes.lo, 7); return 8;        // SET 7,E
+        case 0xFC: set(HL.bytes.hi, 7); return 8;        // SET 7,H
+        case 0xFD: set(HL.bytes.lo, 7); return 8;        // SET 7,L
+        case 0xFE:{
+            uint8_t value = mmu.readByte(HL.reg);
+            set(value, 7);
+            mmu.writeByte(HL.reg, value);
+            return 16;
+        }
+        case 0xFF: set(AF.bytes.hi, 7); return 8;        // SET 7,A
+        
+        default:
+            std::cerr << "Unimplemented CB Opcode: 0x" << std::hex << (int)opcode << " at PC: 0x" << (PC - 2) << std::endl;
+            return 0;
+    }
+}
+
+//look online for gameboy ISA reference
+int CPU::execute(uint8_t opcode){
+    switch(opcode){
+        // 0x0x - Misc and 16-bit BC operations
+        case 0x00: return 4;                            // NOP
+        case 0x01: BC.reg = fetchWord(); return 12;    // LD BC,d16
+        case 0x02: mmu.writeByte(BC.reg, AF.bytes.hi); return 8;   // LD(BC),A
+        case 0x03: inc16(BC.reg); return 8;            // INC BC
+        case 0x04: inc8(BC.bytes.hi); return 4;        // INC B
+        case 0x05: dec8(BC.bytes.hi); return 4;        // DEC B
+        case 0x06: BC.bytes.hi = fetchByte(); return 8;            // LD B,d8
+        case 0x07: rlca(); return 4;                    // RLCA
+        case 0x08:{
+            uint16_t addr = fetchWord();
+            mmu.writeWord(addr, SP);
+            return 20;
+        }
+        case 0x09: add16(HL.reg, BC.reg); return 8;   // ADD HL,BC
+        case 0x0A: AF.bytes.hi = mmu.readByte(BC.reg); return 8;   // LD A,(BC)
+        case 0x0B: dec16(BC.reg); return 8;            // DEC BC
+        case 0x0C: inc8(BC.bytes.lo); return 4;        // INC C
+        case 0x0D: dec8(BC.bytes.lo); return 4;        // DEC C
+        case 0x0E: BC.bytes.lo = fetchByte(); return 8;            // LD C,d8
+        case 0x0F: rrca(); return 4;                    // RRCA
+        
+        // 0x1x - Misc and 16-bit DE operations
+        case 0x10: return 4;                            // STOP
+        case 0x11: DE.reg = fetchWord(); return 12;    // LD DE,d16
+        case 0x12: mmu.writeByte(DE.reg, AF.bytes.hi); return 8;   // LD(DE),A
+        case 0x13: inc16(DE.reg); return 8;            // INC DE
+        case 0x14: inc8(DE.bytes.hi); return 4;        // INC D
+        case 0x15: dec8(DE.bytes.hi); return 4;        // DEC D
+        case 0x16: DE.bytes.hi = fetchByte(); return 8;            // LD D,d8
+        case 0x17: rla(); return 4;                     // RLA
+        case 0x18:{
+            int8_t offset = (int8_t)fetchByte();
+            PC += offset;
+            return 12;
+        }
+        case 0x19: add16(HL.reg, DE.reg); return 8;   // ADD HL,DE
+        case 0x1A: AF.bytes.hi = mmu.readByte(DE.reg); return 8;   // LD A,(DE)
+        case 0x1B: dec16(DE.reg); return 8;            // DEC DE
+        case 0x1C: inc8(DE.bytes.lo); return 4;        // INC E
+        case 0x1D: dec8(DE.bytes.lo); return 4;        // DEC E
+        case 0x1E: DE.bytes.lo = fetchByte(); return 8;            // LD E,d8
+        case 0x1F: rra(); return 4;                     // RRA
+        
+        // 0x2x - Jumps and 16-bit HL operations
+        case 0x20:{
+            int8_t offset = (int8_t)fetchByte();
+            if(!getFlag(ZERO)){
+                PC += offset;
+                return 12;
+            }
+            return 8;
+        }
+        case 0x21: HL.reg = fetchWord(); return 12;    // LD HL,d16
+        case 0x22:{
+            mmu.writeByte(HL.reg, AF.bytes.hi);
+            HL.reg++;
+            return 8;
+        }
+        case 0x23: inc16(HL.reg); return 8;            // INC HL
+        case 0x24: inc8(HL.bytes.hi); return 4;        // INC H
+        case 0x25: dec8(HL.bytes.hi); return 4;        // DEC H
+        case 0x26: HL.bytes.hi = fetchByte(); return 8;            // LD H,d8
+        case 0x27: daa(); return 4;                     // DAA
+        case 0x28:{
+            int8_t offset = (int8_t)fetchByte();
+            if(getFlag(ZERO)){
+                PC += offset;
+                return 12;
+            }
+            return 8;
+        }
+        case 0x29: add16(HL.reg, HL.reg); return 8;   // ADD HL,HL
+        case 0x2A:{
+            AF.bytes.hi = mmu.readByte(HL.reg);
+            HL.reg++;
+            return 8;
+        }
+        case 0x2B: dec16(HL.reg); return 8;            // DEC HL
+        case 0x2C: inc8(HL.bytes.lo); return 4;        // INC L
+        case 0x2D: dec8(HL.bytes.lo); return 4;        // DEC L
+        case 0x2E: HL.bytes.lo = fetchByte(); return 8;            // LD L,d8
+        case 0x2F: cpl(); return 4;                     // CPL
+        
+        // 0x3x - Jumps and 16-bit SP operations
+        case 0x30:{
+            int8_t offset = (int8_t)fetchByte();
+            if(!getFlag(CARRY)){
+                PC += offset;
+                return 12;
+            }
+            return 8;
+        }
+        case 0x31: SP = fetchWord(); return 12;        // LD SP,d16
+        case 0x32:{
+            mmu.writeByte(HL.reg, AF.bytes.hi);
+            HL.reg--;
+            return 8;
+        }
+        case 0x33: inc16(SP); return 8;                // INC SP
+        case 0x34:{
+            uint8_t value = mmu.readByte(HL.reg);
+            inc8(value);
+            mmu.writeByte(HL.reg, value);
+            return 12;
+        }
+        case 0x35:{
+            uint8_t value = mmu.readByte(HL.reg);
+            dec8(value);
+            mmu.writeByte(HL.reg, value);
+            return 12;
+        }
+        case 0x36: mmu.writeByte(HL.reg, fetchByte()); return 12;  // LD(HL),d8
+        case 0x37: scf(); return 4;                     // SCF
+        case 0x38:{
+            int8_t offset = (int8_t)fetchByte();
+            if(getFlag(CARRY)){
+                PC += offset;
+                return 12;
+            }
+            return 8;
+        }
+        case 0x39: add16(HL.reg, SP); return 8;       // ADD HL,SP
+        case 0x3A:{
+            AF.bytes.hi = mmu.readByte(HL.reg);
+            HL.reg--;
+            return 8;
+        }
+        case 0x3B: dec16(SP); return 8;                // DEC SP
+        case 0x3C: inc8(AF.bytes.hi); return 4;        // INC A
+        case 0x3D: dec8(AF.bytes.hi); return 4;        // DEC A
+        case 0x3E: AF.bytes.hi = fetchByte(); return 8;            // LD A,d8
+        case 0x3F: ccf(); return 4;                     // CCF
+        
+        // LD B, x(0x40-0x47)
+        case 0x40: BC.bytes.hi = BC.bytes.hi; return 4;            // LD B,B
+        case 0x41: BC.bytes.hi = BC.bytes.lo; return 4;            // LD B,C
+        case 0x42: BC.bytes.hi = DE.bytes.hi; return 4;            // LD B,D
+        case 0x43: BC.bytes.hi = DE.bytes.lo; return 4;            // LD B,E
+        case 0x44: BC.bytes.hi = HL.bytes.hi; return 4;            // LD B,H
+        case 0x45: BC.bytes.hi = HL.bytes.lo; return 4;            // LD B,L
+        case 0x46: BC.bytes.hi = mmu.readByte(HL.reg); return 8;   // LD B,(HL)
+        case 0x47: BC.bytes.hi = AF.bytes.hi; return 4;            // LD B,A
+        
+        // LD C, x(0x48-0x4F)
+        case 0x48: BC.bytes.lo = BC.bytes.hi; return 4;            // LD C,B
+        case 0x49: BC.bytes.lo = BC.bytes.lo; return 4;            // LD C,C
+        case 0x4A: BC.bytes.lo = DE.bytes.hi; return 4;            // LD C,D
+        case 0x4B: BC.bytes.lo = DE.bytes.lo; return 4;            // LD C,E
+        case 0x4C: BC.bytes.lo = HL.bytes.hi; return 4;            // LD C,H
+        case 0x4D: BC.bytes.lo = HL.bytes.lo; return 4;            // LD C,L
+        case 0x4E: BC.bytes.lo = mmu.readByte(HL.reg); return 8;   // LD C,(HL)
+        case 0x4F: BC.bytes.lo = AF.bytes.hi; return 4;            // LD C,A
+        
+        // LD D, x(0x50-0x57)
+        case 0x50: DE.bytes.hi = BC.bytes.hi; return 4;            // LD D,B
+        case 0x51: DE.bytes.hi = BC.bytes.lo; return 4;            // LD D,C
+        case 0x52: DE.bytes.hi = DE.bytes.hi; return 4;            // LD D,D
+        case 0x53: DE.bytes.hi = DE.bytes.lo; return 4;            // LD D,E
+        case 0x54: DE.bytes.hi = HL.bytes.hi; return 4;            // LD D,H
+        case 0x55: DE.bytes.hi = HL.bytes.lo; return 4;            // LD D,L
+        case 0x56: DE.bytes.hi = mmu.readByte(HL.reg); return 8;   // LD D,(HL)
+        case 0x57: DE.bytes.hi = AF.bytes.hi; return 4;            // LD D,A
+        
+        // LD E, x(0x58-0x5F)
+        case 0x58: DE.bytes.lo = BC.bytes.hi; return 4;            // LD E,B
+        case 0x59: DE.bytes.lo = BC.bytes.lo; return 4;            // LD E,C
+        case 0x5A: DE.bytes.lo = DE.bytes.hi; return 4;            // LD E,D
+        case 0x5B: DE.bytes.lo = DE.bytes.lo; return 4;            // LD E,E
+        case 0x5C: DE.bytes.lo = HL.bytes.hi; return 4;            // LD E,H
+        case 0x5D: DE.bytes.lo = HL.bytes.lo; return 4;            // LD E,L
+        case 0x5E: DE.bytes.lo = mmu.readByte(HL.reg); return 8;   // LD E,(HL)
+        case 0x5F: DE.bytes.lo = AF.bytes.hi; return 4;            // LD E,A
+        
+        // LD H, x(0x60-0x67)
+        case 0x60: HL.bytes.hi = BC.bytes.hi; return 4;            // LD H,B
+        case 0x61: HL.bytes.hi = BC.bytes.lo; return 4;            // LD H,C
+        case 0x62: HL.bytes.hi = DE.bytes.hi; return 4;            // LD H,D
+        case 0x63: HL.bytes.hi = DE.bytes.lo; return 4;            // LD H,E
+        case 0x64: HL.bytes.hi = HL.bytes.hi; return 4;            // LD H,H
+        case 0x65: HL.bytes.hi = HL.bytes.lo; return 4;            // LD H,L
+        case 0x66: HL.bytes.hi = mmu.readByte(HL.reg); return 8;   // LD H,(HL)
+        case 0x67: HL.bytes.hi = AF.bytes.hi; return 4;            // LD H,A
+        
+        // LD L, x(0x68-0x6F)
+        case 0x68: HL.bytes.lo = BC.bytes.hi; return 4;            // LD L,B
+        case 0x69: HL.bytes.lo = BC.bytes.lo; return 4;            // LD L,C
+        case 0x6A: HL.bytes.lo = DE.bytes.hi; return 4;            // LD L,D
+        case 0x6B: HL.bytes.lo = DE.bytes.lo; return 4;            // LD L,E
+        case 0x6C: HL.bytes.lo = HL.bytes.hi; return 4;            // LD L,H
+        case 0x6D: HL.bytes.lo = HL.bytes.lo; return 4;            // LD L,L
+        case 0x6E: HL.bytes.lo = mmu.readByte(HL.reg); return 8;   // LD L,(HL)
+        case 0x6F: HL.bytes.lo = AF.bytes.hi; return 4;            // LD L,A
+        
+        // LD(HL), x(0x70-0x77)
+        case 0x70: mmu.writeByte(HL.reg, BC.bytes.hi); return 8;   // LD(HL),B
+        case 0x71: mmu.writeByte(HL.reg, BC.bytes.lo); return 8;   // LD(HL),C
+        case 0x72: mmu.writeByte(HL.reg, DE.bytes.hi); return 8;   // LD(HL),D
+        case 0x73: mmu.writeByte(HL.reg, DE.bytes.lo); return 8;   // LD(HL),E
+        case 0x74: mmu.writeByte(HL.reg, HL.bytes.hi); return 8;   // LD(HL),H
+        case 0x75: mmu.writeByte(HL.reg, HL.bytes.lo); return 8;   // LD(HL),L
+        case 0x76: return 4;                                        // HALT
+        case 0x77: mmu.writeByte(HL.reg, AF.bytes.hi); return 8;   // LD(HL),A
+        
+        // LD A, x(0x78-0x7F)
+        case 0x78: AF.bytes.hi = BC.bytes.hi; return 4;            // LD A,B
+        case 0x79: AF.bytes.hi = BC.bytes.lo; return 4;            // LD A,C
+        case 0x7A: AF.bytes.hi = DE.bytes.hi; return 4;            // LD A,D
+        case 0x7B: AF.bytes.hi = DE.bytes.lo; return 4;            // LD A,E
+        case 0x7C: AF.bytes.hi = HL.bytes.hi; return 4;            // LD A,H
+        case 0x7D: AF.bytes.hi = HL.bytes.lo; return 4;            // LD A,L
+        case 0x7E: AF.bytes.hi = mmu.readByte(HL.reg); return 8;   // LD A,(HL)
+        case 0x7F: AF.bytes.hi = AF.bytes.hi; return 4;            // LD A,A
+        
+        // ADD A, x(0x80-0x87)
+        case 0x80: add8(AF.bytes.hi, BC.bytes.hi); return 4;       // ADD A,B
+        case 0x81: add8(AF.bytes.hi, BC.bytes.lo); return 4;       // ADD A,C
+        case 0x82: add8(AF.bytes.hi, DE.bytes.hi); return 4;       // ADD A,D
+        case 0x83: add8(AF.bytes.hi, DE.bytes.lo); return 4;       // ADD A,E
+        case 0x84: add8(AF.bytes.hi, HL.bytes.hi); return 4;       // ADD A,H
+        case 0x85: add8(AF.bytes.hi, HL.bytes.lo); return 4;       // ADD A,L
+        case 0x86: {                                                // ADD A,(HL)
+            uint8_t value = mmu.readByte(HL.reg);
+            add8(AF.bytes.hi, value);
+            return 8;
+        }
+        case 0x87: add8(AF.bytes.hi, AF.bytes.hi); return 4;       // ADD A,A
+        
+        // ADC A, x(0x88-0x8F)
+        case 0x88: adc8(AF.bytes.hi, BC.bytes.hi); return 4;       // ADC A,B
+        case 0x89: adc8(AF.bytes.hi, BC.bytes.lo); return 4;       // ADC A,C
+        case 0x8A: adc8(AF.bytes.hi, DE.bytes.hi); return 4;       // ADC A,D
+        case 0x8B: adc8(AF.bytes.hi, DE.bytes.lo); return 4;       // ADC A,E
+        case 0x8C: adc8(AF.bytes.hi, HL.bytes.hi); return 4;       // ADC A,H
+        case 0x8D: adc8(AF.bytes.hi, HL.bytes.lo); return 4;       // ADC A,L
+        case 0x8E: {                                                // ADC A,(HL)
+            uint8_t value = mmu.readByte(HL.reg);
+            adc8(AF.bytes.hi, value);
+            return 8;
+        }
+        case 0x8F: adc8(AF.bytes.hi, AF.bytes.hi); return 4;       // ADC A,A
+        
+        // SUB x(0x90-0x97)
+        case 0x90: sub8(AF.bytes.hi, BC.bytes.hi); return 4;       // SUB B
+        case 0x91: sub8(AF.bytes.hi, BC.bytes.lo); return 4;       // SUB C
+        case 0x92: sub8(AF.bytes.hi, DE.bytes.hi); return 4;       // SUB D
+        case 0x93: sub8(AF.bytes.hi, DE.bytes.lo); return 4;       // SUB E
+        case 0x94: sub8(AF.bytes.hi, HL.bytes.hi); return 4;       // SUB H
+        case 0x95: sub8(AF.bytes.hi, HL.bytes.lo); return 4;       // SUB L
+        case 0x96: {                                                // SUB(HL)
+            uint8_t value = mmu.readByte(HL.reg);
+            sub8(AF.bytes.hi, value);
+            return 8;
+        }
+        case 0x97: sub8(AF.bytes.hi, AF.bytes.hi); return 4;       // SUB A
+        
+        // SBC A, x(0x98-0x9F)
+        case 0x98: sbc8(AF.bytes.hi, BC.bytes.hi); return 4;       // SBC A,B
+        case 0x99: sbc8(AF.bytes.hi, BC.bytes.lo); return 4;       // SBC A,C
+        case 0x9A: sbc8(AF.bytes.hi, DE.bytes.hi); return 4;       // SBC A,D
+        case 0x9B: sbc8(AF.bytes.hi, DE.bytes.lo); return 4;       // SBC A,E
+        case 0x9C: sbc8(AF.bytes.hi, HL.bytes.hi); return 4;       // SBC A,H
+        case 0x9D: sbc8(AF.bytes.hi, HL.bytes.lo); return 4;       // SBC A,L
+        case 0x9E: {                                                // SBC A,(HL)
+            uint8_t value = mmu.readByte(HL.reg);
+            sbc8(AF.bytes.hi, value);
+            return 8;
+        }
+        case 0x9F: sbc8(AF.bytes.hi, AF.bytes.hi); return 4;       // SBC A,A
+        
+        // AND x(0xA0-0xA7)
+        case 0xA0: and8(AF.bytes.hi, BC.bytes.hi); return 4;       // AND B
+        case 0xA1: and8(AF.bytes.hi, BC.bytes.lo); return 4;       // AND C
+        case 0xA2: and8(AF.bytes.hi, DE.bytes.hi); return 4;       // AND D
+        case 0xA3: and8(AF.bytes.hi, DE.bytes.lo); return 4;       // AND E
+        case 0xA4: and8(AF.bytes.hi, HL.bytes.hi); return 4;       // AND H
+        case 0xA5: and8(AF.bytes.hi, HL.bytes.lo); return 4;       // AND L
+        case 0xA6: {                                                // AND(HL)
+            uint8_t value = mmu.readByte(HL.reg);
+            and8(AF.bytes.hi, value);
+            return 8;
+        }
+        case 0xA7: and8(AF.bytes.hi, AF.bytes.hi); return 4;       // AND A
+        
+        // XOR x(0xA8-0xAF)
+        case 0xA8: xor8(AF.bytes.hi, BC.bytes.hi); return 4;       // XOR B
+        case 0xA9: xor8(AF.bytes.hi, BC.bytes.lo); return 4;       // XOR C
+        case 0xAA: xor8(AF.bytes.hi, DE.bytes.hi); return 4;       // XOR D
+        case 0xAB: xor8(AF.bytes.hi, DE.bytes.lo); return 4;       // XOR E
+        case 0xAC: xor8(AF.bytes.hi, HL.bytes.hi); return 4;       // XOR H
+        case 0xAD: xor8(AF.bytes.hi, HL.bytes.lo); return 4;       // XOR L
+        case 0xAE: {                                                // XOR(HL)
+            uint8_t value = mmu.readByte(HL.reg);
+            xor8(AF.bytes.hi, value);
+            return 8;
+        }
+        case 0xAF: xor8(AF.bytes.hi, AF.bytes.hi); return 4;       // XOR A
+        
+        // OR x(0xB0-0xB7)
+        case 0xB0: or8(AF.bytes.hi, BC.bytes.hi); return 4;        // OR B
+        case 0xB1: or8(AF.bytes.hi, BC.bytes.lo); return 4;        // OR C
+        case 0xB2: or8(AF.bytes.hi, DE.bytes.hi); return 4;        // OR D
+        case 0xB3: or8(AF.bytes.hi, DE.bytes.lo); return 4;        // OR E
+        case 0xB4: or8(AF.bytes.hi, HL.bytes.hi); return 4;        // OR H
+        case 0xB5: or8(AF.bytes.hi, HL.bytes.lo); return 4;        // OR L
+        case 0xB6: {                                                // OR(HL)
+            uint8_t value = mmu.readByte(HL.reg);
+            or8(AF.bytes.hi, value);
+            return 8;
+        }
+        case 0xB7: or8(AF.bytes.hi, AF.bytes.hi); return 4;        // OR A
+        
+        // CP x(0xB8-0xBF)
+        case 0xB8: compare(BC.bytes.hi); return 4;                 // CP B
+        case 0xB9: compare(BC.bytes.lo); return 4;                 // CP C
+        case 0xBA: compare(DE.bytes.hi); return 4;                 // CP D
+        case 0xBB: compare(DE.bytes.lo); return 4;                 // CP E
+        case 0xBC: compare(HL.bytes.hi); return 4;                 // CP H
+        case 0xBD: compare(HL.bytes.lo); return 4;                 // CP L
+        case 0xBE: compare(mmu.readByte(HL.reg)); return 8;        // CP(HL)
+        case 0xBF: compare(AF.bytes.hi); return 4;                 // CP A
+        
+        // 0xCx - Control flow and immediates
+        case 0xC0: if(!getFlag(ZERO)){ PC = popWord(); return 20; } popWord(); return 8;  // RET NZ
+        case 0xC1: BC.reg = popWord(); return 12;                  // POP BC
+        case 0xC2: {                                                // JP NZ,a16
+            uint16_t addr = fetchWord();
+            if(!getFlag(ZERO)){ PC = addr; return 16; }
+            return 12;
+        }
+        case 0xC3: PC = fetchWord(); return 16;                    // JP a16
+        case 0xC4: {                                                // CALL NZ,a16
+            uint16_t addr = fetchWord();
+            if(!getFlag(ZERO)){ pushWord(PC); PC = addr; return 24; }
+            return 12;
+        }
+        case 0xC5: pushWord(BC.reg); return 16;                    // PUSH BC
+        case 0xC6: add8(AF.bytes.hi, fetchByte()); return 8;       // ADD A,d8
+        case 0xC7: pushWord(PC); PC = 0x00; return 16;             // RST 00H
+        case 0xC8: if(getFlag(ZERO)){ PC = popWord(); return 20; } popWord(); return 8;  // RET Z
+        case 0xC9: PC = popWord(); return 16;                      // RET
+        case 0xCA: {                                                // JP Z,a16
+            uint16_t addr = fetchWord();
+            if(getFlag(ZERO)){ PC = addr; return 16; }
+            return 12;
+        }
+        case 0xCB: return executeCB(fetchByte());                  // PREFIX CB(handled separately)
+        case 0xCC: {                                                // CALL Z,a16
+            uint16_t addr = fetchWord();
+            if(getFlag(ZERO)){ pushWord(PC); PC = addr; return 24; }
+            return 12;
+        }
+        case 0xCD:{ pushWord(PC); PC = fetchWord(); return 24; }  // CALL a16
+        case 0xCE: adc8(AF.bytes.hi, fetchByte()); return 8;       // ADC A,d8
+        case 0xCF: pushWord(PC); PC = 0x08; return 16;             // RST 08H
+        
+        // 0xDx - More control flow and immediates
+        case 0xD0: if(!getFlag(CARRY)){ PC = popWord(); return 20; } popWord(); return 8;  // RET NC
+        case 0xD1: DE.reg = popWord(); return 12;                  // POP DE
+        case 0xD2: {                                                // JP NC,a16
+            uint16_t addr = fetchWord();
+            if(!getFlag(CARRY)){ PC = addr; return 16; }
+            return 12;
+        }
+        case 0xD4: {                                                // CALL NC,a16
+            uint16_t addr = fetchWord();
+            if(!getFlag(CARRY)){ pushWord(PC); PC = addr; return 24; }
+            return 12;
+        }
+        case 0xD5: pushWord(DE.reg); return 16;                    // PUSH DE
+        case 0xD6: sub8(AF.bytes.hi, fetchByte()); return 8;       // SUB d8
+        case 0xD7: pushWord(PC); PC = 0x10; return 16;             // RST 10H
+        case 0xD8: if(getFlag(CARRY)){ PC = popWord(); return 20; } popWord(); return 8;  // RET C
+        case 0xD9: PC = popWord(); return 16;                      // RETI(no interrupt flag change for now)
+        case 0xDA: {                                                // JP C,a16
+            uint16_t addr = fetchWord();
+            if(getFlag(CARRY)){ PC = addr; return 16; }
+            return 12;
+        }
+        case 0xDC: {                                                // CALL C,a16
+            uint16_t addr = fetchWord();
+            if(getFlag(CARRY)){ pushWord(PC); PC = addr; return 24; }
+            return 12;
+        }
+        case 0xDE: sbc8(AF.bytes.hi, fetchByte()); return 8;       // SBC A,d8
+        case 0xDF: pushWord(PC); PC = 0x18; return 16;             // RST 18H
+        
+        // 0xEx - I/O and more control flow
+        case 0xE0: {                                                // LDH(a8),A
+            uint8_t offset = fetchByte();
+            mmu.writeByte(0xFF00 + offset, AF.bytes.hi);
+            return 12;
+        }
+        case 0xE1: HL.reg = popWord(); return 12;                  // POP HL
+        case 0xE2: mmu.writeByte(0xFF00 + BC.bytes.lo, AF.bytes.hi); return 8;  // LD(C),A
+        case 0xE5: pushWord(HL.reg); return 16;                    // PUSH HL
+        case 0xE6: and8(AF.bytes.hi, fetchByte()); return 8;       // AND d8
+        case 0xE7: pushWord(PC); PC = 0x20; return 16;             // RST 20H
+        case 0xE8: {                                                // ADD SP,r8
+            int8_t offset = (int8_t)fetchByte();
+            add16(SP, (uint16_t)(int16_t)offset);
+            return 16;
+        }
+        case 0xE9: PC = HL.reg; return 4;                          // JP(HL)
+        case 0xEA: {                                                // LD(a16),A
+            uint16_t addr = fetchWord();
+            mmu.writeByte(addr, AF.bytes.hi);
+            return 16;
+        }
+        case 0xEE: xor8(AF.bytes.hi, fetchByte()); return 8;       // XOR d8
+        case 0xEF: pushWord(PC); PC = 0x28; return 16;             // RST 28H
+        
+        // 0xFx - More I/O and final opcodes
+        case 0xF0: {                                                // LDH A,(a8)
+            uint8_t offset = fetchByte();
+            AF.bytes.hi = mmu.readByte(0xFF00 + offset);
+            return 12;
+        }
+        case 0xF1: AF.reg = popWord(); return 12;                  // POP AF
+        case 0xF2: AF.bytes.hi = mmu.readByte(0xFF00 + BC.bytes.lo); return 8;  // LD A,(C)
+        case 0xF3: disableInterrupts(); return 4;                  // DI
+        case 0xF5: pushWord(AF.reg); return 16;                    // PUSH AF
+        case 0xF6: or8(AF.bytes.hi, fetchByte()); return 8;        // OR d8
+        case 0xF7: pushWord(PC); PC = 0x30; return 16;             // RST 30H
+        case 0xF8: {                                                // LD HL,SP+r8
+            int8_t offset = (int8_t)fetchByte();
+            HL.reg = SP + (int16_t)offset;
+            clearFlag(ZERO);
+            clearFlag(SUBTRACT);
+            // Half-carry and carry set based on SP + offset
+            if(((SP & 0x0F) + (offset & 0x0F)) > 0x0F){
+                setFlag(HALF_CARRY);
+            } else {
+                clearFlag(HALF_CARRY);
+            }
+            if(((SP & 0xFF) + (uint8_t)offset) > 0xFF){
+                setFlag(CARRY);
+            } else {
+                clearFlag(CARRY);
+            }
+            return 12;
+        }
+        case 0xF9: SP = HL.reg; return 8;                          // LD SP,HL
+        case 0xFA: {                                                // LD A,(a16)
+            uint16_t addr = fetchWord();
+            AF.bytes.hi = mmu.readByte(addr);
+            return 16;
+        }
+        case 0xFB: enableInterrupts(); return 4;                   // EI
+        case 0xFE: compare(fetchByte()); return 8;                 // CP d8
+        case 0xFF: pushWord(PC); PC = 0x38; return 16;             // RST 38H
+        
+        default:
+            std::cerr << "Unimplemented Opcode: 0x" << std::hex << (int)opcode << " at PC: 0x" << (PC - 1) << std::endl;
+            return 0;
+    }
+}

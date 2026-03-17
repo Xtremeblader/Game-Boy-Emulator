@@ -1,0 +1,45 @@
+# Build artifacts
+*.o
+*.a
+*.so
+*.dll
+*.dylib
+*.exe
+
+# Compiled executables
+emulator
+test_cb_opcodes
+test_interrupts
+test_joypad
+test_opcodes
+test_ppu
+test_rom_loading
+test_timer
+
+# IDE and editor files
+.vscode/
+.vs/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+
+# Debug symbols
+*.dSYM/
+*.su
+*.gch
+*.pch
+
+# CMake and build directories (if you add these later)
+build/
+cmake-build-debug/
+cmake-build-release/
+
+# Dependencies (if you add external libraries)
+lib/
+include/external/
+
+# System files
+*.log
