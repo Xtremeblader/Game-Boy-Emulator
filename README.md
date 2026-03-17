@@ -167,7 +167,9 @@ Contributions welcome! Areas with most potential impact:
 - Bug fixes and optimizations
 
 ## License
-[Add your license here]
+MIT License - See [LICENSE](LICENSE) file for details
+
+This project is free to use, modify, and distribute. See the LICENSE file for full terms.
 
 ## References
 - [Pan Docs](https://gbdev.io/pandocs/) - Game Boy technical reference
