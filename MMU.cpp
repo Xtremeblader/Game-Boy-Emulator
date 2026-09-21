@@ -1,4 +1,5 @@
 #include "MMU.h"
+#include "PPU.h"
 #include "Cartridge.h"
 #include <fstream>
 #include <iostream>
@@ -24,6 +25,24 @@ void MMU::linkInterruptRegisters(uint8_t* ie_ptr, uint8_t* if_ptr){
 }
 
 uint8_t MMU::readByte(uint16_t address) const {
+    // Until host input is connected, all active-low joypad inputs are released.
+    if(address == 0xFF00) return (io_registers[0] & 0x30) | 0xCF;
+    if(address == 0xFFFF && IE_ptr) return *IE_ptr;
+    if(ppu){
+        switch(address){
+            case 0xFF40: return ppu->readLCDC();
+            case 0xFF41: return ppu->readSTAT();
+            case 0xFF42: return ppu->readSCY();
+            case 0xFF43: return ppu->readSCX();
+            case 0xFF44: return ppu->readLY();
+            case 0xFF45: return ppu->readLYC();
+            case 0xFF47: return ppu->readBGP();
+            case 0xFF48: return ppu->readOBP0();
+            case 0xFF49: return ppu->readOBP1();
+            case 0xFF4A: return ppu->readWY();
+            case 0xFF4B: return ppu->readWX();
+        }
+    }
     // ROM area(0x0000-0x7FFF)
     if(address < 0x8000){
         if(cartridge){
@@ -70,9 +89,6 @@ uint8_t MMU::readByte(uint16_t address) const {
         uint8_t io_addr = address - 0xFF00;
         
         // Handle special mappings
-        if(address == 0xFFFF && IE_ptr){
-            return *IE_ptr;
-        }
         if(address == 0xFF0F && IF_ptr){
             return *IF_ptr;
         }
@@ -85,6 +101,22 @@ uint8_t MMU::readByte(uint16_t address) const {
 }
 
 void MMU::writeByte(uint16_t address, uint8_t value){
+    if(address == 0xFFFF && IE_ptr){ *IE_ptr = value; return; }
+    if(ppu){
+        switch(address){
+            case 0xFF40: ppu->writeLCDC(value); return;
+            case 0xFF41: ppu->writeSTAT(value); return;
+            case 0xFF42: ppu->writeSCY(value); return;
+            case 0xFF43: ppu->writeSCX(value); return;
+            case 0xFF44: ppu->writeLY(value); return;
+            case 0xFF45: ppu->writeLYC(value); return;
+            case 0xFF47: ppu->writeBGP(value); return;
+            case 0xFF48: ppu->writeOBP0(value); return;
+            case 0xFF49: ppu->writeOBP1(value); return;
+            case 0xFF4A: ppu->writeWY(value); return;
+            case 0xFF4B: ppu->writeWX(value); return;
+        }
+    }
     // ROM area(0x0000-0x7FFF) - Used for bank switching
     if(address < 0x8000){
         if(cartridge){
@@ -133,10 +165,6 @@ void MMU::writeByte(uint16_t address, uint8_t value){
     // I/O Registers(0xFF00-0xFF7F)
     if(address < 0xFF80){
         // Handle special mappings
-        if(address == 0xFFFF && IE_ptr){
-            *IE_ptr = value;
-            return;
-        }
         if(address == 0xFF0F && IF_ptr){
             *IF_ptr = value;
             return;

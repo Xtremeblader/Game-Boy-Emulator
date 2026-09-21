@@ -1,6 +1,6 @@
 #include "PPU.h"
 #include "MMU.h"
-#include <cstring>
+#include <algorithm>
 
 PPU::PPU(MMU& mmu_ref) 
     : mmu(mmu_ref), 
@@ -21,86 +21,53 @@ PPU::PPU(MMU& mmu_ref)
       frame_ready(false),
       vblank_interrupt(false),
       lcd_stat_interrupt(false){
-    framebuffer.fill(0xFFFF);  // White
+    framebuffer.fill(0x7FFF);  // White
+}
+
+void PPU::updateStatInterrupt(){
+    bool signal = isPPUEnabled() && (
+        (current_mode == HBLANK && getHBlankStatInterrupt()) ||
+        (current_mode == VBLANK && getVBlankStatInterrupt()) ||
+        (current_mode == OAM_SEARCH && getOAMInterrupt()) ||
+        (ly == lyc && getLYCInterrupt()));
+    if(signal && !stat_line) lcd_stat_interrupt = true;
+    stat_line = signal;
 }
 
 void PPU::update(int cycles){
-    if(!isPPUEnabled()){
-        return;
-    }
-    
+    if(!isPPUEnabled() || cycles <= 0) return;
     cycles_in_mode += cycles;
-    
-    switch(current_mode){
-        case OAM_SEARCH:
-            // 80 cycles
-            if(cycles_in_mode >= 80){
-                cycles_in_mode -= 80;
+    while(true){
+        int duration = current_mode == OAM_SEARCH ? 80 :
+                       current_mode == PIXEL_TRANSFER ? 172 :
+                       current_mode == HBLANK ? 204 : 456;
+        if(cycles_in_mode < duration) break;
+        cycles_in_mode -= duration;
+        switch(current_mode){
+            case OAM_SEARCH:
                 current_mode = PIXEL_TRANSFER;
-            }
-            break;
-            
-        case PIXEL_TRANSFER:
-            // 172-289 cycles(varies)
-            if(cycles_in_mode >= 172){
-                cycles_in_mode -= 172;
-                current_mode = HBLANK;
-                // Render this scanline
+                break;
+            case PIXEL_TRANSFER:
                 renderScanline();
-            }
-            break;
-            
-        case HBLANK:
-            // 87 cycles
-            if(cycles_in_mode >= 87){
-                cycles_in_mode -= 87;
-                current_scanline++;
-                ly = current_scanline;
-                
-                // Check LY==LYC interrupt
-                if(ly == lyc && getLYCInterrupt()){
-                    lcd_stat_interrupt = true;
-                }
-                
-                if(current_scanline >= 144){
-                    // Enter V-Blank
+                current_mode = HBLANK;
+                break;
+            case HBLANK:
+                ly = ++current_scanline;
+                if(ly == 144){
                     current_mode = VBLANK;
                     vblank_interrupt = true;
                     frame_ready = true;
-                    
-                    if(getVBlankStatInterrupt()){
-                        lcd_stat_interrupt = true;
-                    }
-                } else {
-                    // Next scanline
+                } else current_mode = OAM_SEARCH;
+                break;
+            case VBLANK:
+                ly = ++current_scanline;
+                if(ly == 154){
+                    ly = current_scanline = 0;
                     current_mode = OAM_SEARCH;
-                    
-                    if(getOAMInterrupt()){
-                        lcd_stat_interrupt = true;
-                    }
                 }
-            }
-            break;
-            
-        case VBLANK:
-            // 456 cycles per line
-            if(cycles_in_mode >= 456){
-                cycles_in_mode -= 456;
-                current_scanline++;
-                ly = current_scanline;
-                
-                if(current_scanline >= 154){
-                    // Back to line 0
-                    current_scanline = 0;
-                    ly = 0;
-                    current_mode = OAM_SEARCH;
-                    
-                    if(getOAMInterrupt()){
-                        lcd_stat_interrupt = true;
-                    }
-                }
-            }
-            break;
+                break;
+        }
+        updateStatInterrupt();
     }
 }
 
@@ -110,6 +77,11 @@ void PPU::renderScanline(){
     // Simple background rendering for now
     uint16_t* scanline_ptr = framebuffer.data() + (current_scanline * 160);
     
+    if(!backgroundEnabled()){
+        std::fill(scanline_ptr, scanline_ptr + 160, 0x7FFF);
+        return;
+    }
+
     // Calculate which tile row we're in
     uint8_t scroll_y = scy + current_scanline;
     uint8_t tile_row = scroll_y / 8;
@@ -143,7 +115,7 @@ void PPU::renderScanline(){
         }
         
         // Get pixel from tile
-        uint8_t tile_line_addr = tile_data_addr + tile_pixel_y * 2;
+        uint16_t tile_line_addr = tile_data_addr + tile_pixel_y * 2;
         uint8_t low = mmu.readByte(tile_line_addr);
         uint8_t high = mmu.readByte(tile_line_addr + 1);
         
@@ -180,17 +152,32 @@ uint16_t PPU::colorToRGB555(uint8_t pixel, uint8_t palette){
 
 // I/O Register accessors
 uint8_t PPU::readLCDC() const { return lcdc; }
-void PPU::writeLCDC(uint8_t value){ lcdc = value; }
+void PPU::writeLCDC(uint8_t value){
+    bool was_enabled = isPPUEnabled();
+    lcdc = value;
+    if(was_enabled != isPPUEnabled()){
+        cycles_in_mode = 0;
+        ly = current_scanline = 0;
+        current_mode = isPPUEnabled() ? OAM_SEARCH : HBLANK;
+        frame_ready = vblank_interrupt = lcd_stat_interrupt = false;
+        if(!isPPUEnabled()){
+            framebuffer.fill(0x7FFF);
+            frame_ready = true;
+        }
+    }
+    updateStatInterrupt();
+}
 
 uint8_t PPU::readSTAT() const {
-    uint8_t result = stat & 0xF8;  // Bits 3-7
+    uint8_t result = (stat & 0xF8) | 0x80;  // Bits 3-7
     result |= static_cast<uint8_t>(current_mode);
     result |= (ly == lyc) ? (1 << 2) : 0;
     return result;
 }
 
 void PPU::writeSTAT(uint8_t value){
-    stat = (value & 0xF8);  // Only bits 3-7 are writable
+    stat = (value & 0x78);
+    updateStatInterrupt();  // Only bits 3-7 are writable
 }
 
 uint8_t PPU::readSCY() const { return scy; }
@@ -200,10 +187,10 @@ uint8_t PPU::readSCX() const { return scx; }
 void PPU::writeSCX(uint8_t value){ scx = value; }
 
 uint8_t PPU::readLY() const { return ly; }
-void PPU::writeLY(uint8_t value){ ly = 0; }  // Writing resets to 0
+void PPU::writeLY(uint8_t){ }  // Read-only
 
 uint8_t PPU::readLYC() const { return lyc; }
-void PPU::writeLYC(uint8_t value){ lyc = value; }
+void PPU::writeLYC(uint8_t value){ lyc = value; updateStatInterrupt(); }
 
 uint8_t PPU::readBGP() const { return bgp; }
 void PPU::writeBGP(uint8_t value){ bgp = value; }

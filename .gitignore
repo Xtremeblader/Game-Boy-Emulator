@@ -44,3 +44,10 @@ include/external/
 # System files
 *.log
 *.gb
+
+# Local graphics builds and captures
+/emulator-headless
+/test-graphics
+/*.ppm
+
+/test-cpu-control

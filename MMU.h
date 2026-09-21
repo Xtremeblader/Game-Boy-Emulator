@@ -5,6 +5,7 @@
 #include <memory>
 
 class Cartridge;
+class PPU;
 
 class MMU {
 public:
@@ -15,6 +16,8 @@ public:
     bool loadCartridge(const std::string& filepath);
     Cartridge* getCartridge() const { return cartridge.get(); }
     
+    void linkPPU(PPU* value) { ppu = value; }
+
     // Link interrupt registers for I/O mapping
     void linkInterruptRegisters(uint8_t* ie_ptr, uint8_t* if_ptr);
     
@@ -31,6 +34,7 @@ public:
 
 private:
     std::unique_ptr<Cartridge> cartridge;
+    PPU* ppu = nullptr;
     
     // Internal RAM and I/O
     // 0x0000-0x3FFF: ROM Bank 0 (from cartridge)

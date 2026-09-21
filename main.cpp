@@ -1,40 +1,106 @@
 #include "MMU.h"
 #include "CPU.h"
+#include "PPU.h"
+#include "Display.h"
+#include <chrono>
+#include <fstream>
 #include <iostream>
 #include <string>
+#include <thread>
 
 int main(int argc, char* argv[]){
-    MMU mmu;
-    CPU cpu(mmu);
-
-    // Get ROM path from command line or use default
-    std::string rom_path = "Tetris(JUE) (V1.1) [!].gb";
-    if(argc > 1){
-        rom_path = argv[1];
-    }
-
-    if(!mmu.loadCartridge(rom_path)){
-        std::cerr << "Failed to load cartridge: " << rom_path << std::endl;
-        std::cerr << "Usage: " << argv[0] << " [path_to_rom]" << std::endl;
+    bool headless = false, pattern = false;
+    unsigned long long limit = 0;
+    std::string rom = "Tetris (JUE) (V1.1) [!].gb", screenshot;
+    try {
+        for(int i = 1; i < argc; ++i){
+            std::string arg = argv[i];
+            if(arg == "--headless") headless = true;
+            else if(arg == "--test-pattern") pattern = true;
+            else if(arg == "--frames" && i + 1 < argc){
+                std::string number = argv[++i];
+                if(number.empty() || number.find_first_not_of("0123456789") != std::string::npos)
+                    throw std::invalid_argument("frames");
+                limit = std::stoull(number);
+                if(!limit) throw std::invalid_argument("frames");
+            } else if(arg == "--screenshot" && i + 1 < argc) screenshot = argv[++i];
+            else if(arg == "--help"){
+                std::cout << "Usage: emulator [ROM] [--headless] [--frames N] [--test-pattern] [--screenshot image.ppm]\n";
+                return 0;
+            } else if(arg.rfind("--", 0) == 0) throw std::invalid_argument(arg);
+            else rom = arg;
+        }
+    } catch(const std::exception&){
+        std::cerr << "Invalid arguments. Use --help; --frames requires a positive integer.\n";
         return 1;
     }
-
-    std::cout << "Starting emulation... (Press Ctrl+C to stop)" << std::endl;
-    
-    bool running = true;
-    int cycle_count = 0;
-    
-    // Simple emulation loop(no timing yet)
-    while(running && cycle_count < 1000000){
-        cpu.step();
-        cycle_count++;
-        
-        // For now, just run for 1M cycles and stop
-        if(cycle_count % 100000 == 0){
-            std::cout << "Executed " << cycle_count << " cycles, PC: 0x" << std::hex << cpu.PC << std::dec << std::endl;
+    if(headless && !limit) limit = 60;
+    MMU mmu;
+    CPU cpu(mmu);
+    PPU ppu(mmu);
+    mmu.linkPPU(&ppu);
+    if(pattern){
+        mmu.writeByte(0xFF47, 0xE4);
+        // Four vertical shades in each tile, repeated across the background.
+        for(int row = 0; row < 8; ++row){
+            mmu.writeByte(0x8000 + row * 2, 0x33);
+            mmu.writeByte(0x8001 + row * 2, 0x0F);
+        }
+    } else if(!mmu.loadCartridge(rom)) return 1;
+    Display display;
+    if(!headless && !display.open()){
+        std::cerr << "Display error: " << display.error() << '\n';
+        return 1;
+    }
+    using Clock = std::chrono::steady_clock;
+    auto deadline = Clock::now();
+    const auto frame_time = std::chrono::duration_cast<Clock::duration>(
+        std::chrono::duration<double>(70224.0 / 4194304.0));
+    unsigned long long frames = 0, cycles = 0;
+    int budget = 0;
+    // Host frames keep events responsive even when the ROM disables the LCD.
+    while(!limit || frames < limit){
+        if(!headless && !display.poll()) break;
+        budget += 70224;
+        while(budget > 0){
+            int elapsed = pattern ? 4 : cpu.step();
+            if(elapsed <= 0){ std::cerr << "CPU returned invalid timing\n"; return 1; }
+            ppu.update(elapsed);
+            cycles += elapsed;
+            budget -= elapsed;
+            if(ppu.getVBlankInterrupt()){
+                cpu.IF |= 1 << CPU::V_BLANK;
+                ppu.clearVBlankInterrupt();
+            }
+            if(ppu.getLcdStatInterrupt()){
+                cpu.IF |= 1 << CPU::LCD_STAT;
+                ppu.clearLcdStatInterrupt();
+            }
+            if(ppu.hasNewFrame()){
+                if(!headless && !display.present(ppu.getFramebuffer())){
+                    std::cerr << "Display error: " << display.error() << '\n';
+                    return 1;
+                }
+                ppu.resetFrameReady();
+            }
+        }
+        ++frames;
+        if(!headless){
+            deadline += frame_time;
+            std::this_thread::sleep_until(deadline);
+            if(Clock::now() - deadline > frame_time * 4) deadline = Clock::now();
         }
     }
-
-    std::cout << "Emulation stopped. Total cycles: " << cycle_count << std::endl;
-    return 0;
+    if(!screenshot.empty()){
+        std::ofstream output(screenshot, std::ios::binary);
+        output << "P6\n160 144\n255\n";
+        for(uint16_t color : ppu.getFramebuffer()){
+            for(int shift : {10, 5, 0}){
+                unsigned c = (color >> shift) & 31;
+                output.put(static_cast<char>((c << 3) | (c >> 2)));
+            }
+        }
+        if(!output){ std::cerr << "Failed to write screenshot\n"; return 1; }
+    }
+    std::cout << "Emulation stopped: " << frames << " host frames, " << cycles << " CPU clock cycles.\n";
 }

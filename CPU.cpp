@@ -1405,7 +1405,7 @@ int CPU::execute(uint8_t opcode){
         case 0xBF: compare(AF.bytes.hi); return 4;                 // CP A
         
         // 0xCx - Control flow and immediates
-        case 0xC0: if(!getFlag(ZERO)){ PC = popWord(); return 20; } popWord(); return 8;  // RET NZ
+        case 0xC0: if(!getFlag(ZERO)){ PC = popWord(); return 20; } return 8;  // RET NZ
         case 0xC1: BC.reg = popWord(); return 12;                  // POP BC
         case 0xC2: {                                                // JP NZ,a16
             uint16_t addr = fetchWord();
@@ -1421,7 +1421,7 @@ int CPU::execute(uint8_t opcode){
         case 0xC5: pushWord(BC.reg); return 16;                    // PUSH BC
         case 0xC6: add8(AF.bytes.hi, fetchByte()); return 8;       // ADD A,d8
         case 0xC7: pushWord(PC); PC = 0x00; return 16;             // RST 00H
-        case 0xC8: if(getFlag(ZERO)){ PC = popWord(); return 20; } popWord(); return 8;  // RET Z
+        case 0xC8: if(getFlag(ZERO)){ PC = popWord(); return 20; } return 8;  // RET Z
         case 0xC9: PC = popWord(); return 16;                      // RET
         case 0xCA: {                                                // JP Z,a16
             uint16_t addr = fetchWord();
@@ -1434,12 +1434,12 @@ int CPU::execute(uint8_t opcode){
             if(getFlag(ZERO)){ pushWord(PC); PC = addr; return 24; }
             return 12;
         }
-        case 0xCD:{ pushWord(PC); PC = fetchWord(); return 24; }  // CALL a16
+        case 0xCD:{ uint16_t target = fetchWord(); pushWord(PC); PC = target; return 24; }  // CALL a16
         case 0xCE: adc8(AF.bytes.hi, fetchByte()); return 8;       // ADC A,d8
         case 0xCF: pushWord(PC); PC = 0x08; return 16;             // RST 08H
         
         // 0xDx - More control flow and immediates
-        case 0xD0: if(!getFlag(CARRY)){ PC = popWord(); return 20; } popWord(); return 8;  // RET NC
+        case 0xD0: if(!getFlag(CARRY)){ PC = popWord(); return 20; } return 8;  // RET NC
         case 0xD1: DE.reg = popWord(); return 12;                  // POP DE
         case 0xD2: {                                                // JP NC,a16
             uint16_t addr = fetchWord();
@@ -1454,8 +1454,8 @@ int CPU::execute(uint8_t opcode){
         case 0xD5: pushWord(DE.reg); return 16;                    // PUSH DE
         case 0xD6: sub8(AF.bytes.hi, fetchByte()); return 8;       // SUB d8
         case 0xD7: pushWord(PC); PC = 0x10; return 16;             // RST 10H
-        case 0xD8: if(getFlag(CARRY)){ PC = popWord(); return 20; } popWord(); return 8;  // RET C
-        case 0xD9: PC = popWord(); return 16;                      // RETI(no interrupt flag change for now)
+        case 0xD8: if(getFlag(CARRY)){ PC = popWord(); return 20; } return 8;  // RET C
+        case 0xD9: PC = popWord(); IME = true; return 16;                      // RETI
         case 0xDA: {                                                // JP C,a16
             uint16_t addr = fetchWord();
             if(getFlag(CARRY)){ PC = addr; return 16; }

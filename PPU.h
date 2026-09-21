@@ -14,10 +14,10 @@ public:
     
     // PPU mode/state
     enum PPUMode {
-        HBLANK = 0,      // Horizontal blank(0-87 cycles)
-        VBLANK = 1,      // Vertical blank(2288-4563 cycles)
-        OAM_SEARCH = 2,  // OAM search(80-252 cycles)
-        PIXEL_TRANSFER = 3  // Pixel transfer(172-289 cycles)
+        HBLANK = 0,      // Horizontal blank (204 dots in this simplified model)
+        VBLANK = 1,      // Vertical blank (10 lines)
+        OAM_SEARCH = 2,  // OAM search (80 dots)
+        PIXEL_TRANSFER = 3  // Pixel transfer (fixed 172 dots for now)
     };
     
     PPUMode getMode() const { return current_mode; }
@@ -101,6 +101,9 @@ private:
     bool vblank_interrupt;
     bool lcd_stat_interrupt;
     
+    bool stat_line = false;
+    void updateStatInterrupt();
+
     // Rendering helpers
     void renderScanline();
     void renderBackgroundScanline();

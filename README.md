@@ -58,44 +58,78 @@ A C++ implementation of a Game Boy emulator, building a cycle-accurate CPU emula
 ## Building
 
 ### Requirements
-- C++17 compatible compiler (g++ 7.0+)
-- Linux/WSL environment
+- C++17 compiler and Make
+- Linux/WSL; a working graphical session (such as WSLg) for the window
+- SDL3 development files and pkg-config for the graphical build
 
-### Compilation
+On Ubuntu versions that provide SDL3:
 ```bash
-g++ -std=c++17 main.cpp CPU.cpp Cartridge.cpp MMU.cpp PPU.cpp Timer.cpp Joypad.cpp -o emulator
+sudo apt-get install build-essential libsdl3-dev pkg-config
+make
+./emulator 'Tetris (JUE) (V1.1) [!].gb'
 ```
 
-With full error checking:
+If your distribution does not package SDL3, install it using the
+[official SDL instructions](https://wiki.libsdl.org/SDL3/Installation).
+The display uses the SDL3 API, not SDL2.
+
+The window displays the 160×144 background at 4× size initially. Resize the
+window as needed; Escape or closing the window exits. Emulation is paced to
+approximately 59.73 host frames per second. Keyboard gameplay input is not yet
+connected. Window-layer graphics, sprites, audio, and full game compatibility
+remain unfinished; a visible background does not imply a fully playable game.
+The Tetris startup smoke test now reaches the title screen. The unconnected
+joypad reports all buttons released to avoid triggering the game's soft reset.
+Keyboard input is still needed to start playing. Use `--test-pattern` to verify
+the graphics path independently.
+
+### Graphics smoke test (no ROM needed)
 ```bash
-g++ -g -std=c++17 -Wall -Wextra -pedantic-errors -Weffc++ -Wno-unused-parameter -fsanitize=undefined,address main.cpp CPU.cpp Cartridge.cpp MMU.cpp PPU.cpp Timer.cpp Joypad.cpp -o emulator
+./emulator --test-pattern
+```
+Expect repeating white, light-gray, dark-gray, and black vertical stripes.
+
+### Headless build and frame capture
+No SDL dependency is required for this build:
+```bash
+make headless
+./emulator-headless --headless --test-pattern --frames 1 --screenshot pattern.ppm
+./emulator-headless --headless 'Tetris (JUE) (V1.1) [!].gb' --frames 120 --screenshot tetris.ppm
 ```
 
-### Running
-```bash
-./emulator <rom_file.gb>
-```
+`--frames N` limits execution to N host intervals of 70,224 CPU clock cycles,
+including when the emulated LCD is disabled. Headless mode defaults to 60 such
+intervals. `--screenshot` saves the final framebuffer as a binary PPM image.
+The normal graphical run continues until you close it. Use `--help` for options.
 
-Example:
-```bash
-./emulator Tetris.gb
-```
+### Graphics implementation
+The CPU's elapsed clock cycles advance the PPU; MMU graphics register accesses
+are forwarded to it. VBlank and STAT requests set the CPU interrupt flags.
+The background renderer supports scrolling, both tile maps, signed/unsigned
+tile addressing, and the DMG background palette. Timing currently uses fixed
+80/172/204-dot visible-line phases and ten VBlank lines; variable pixel-transfer
+timing and CPU VRAM/OAM access restrictions are not yet implemented.
 
 ## Testing
 
-Test suites are provided for individual components:
+Run the graphics regression suite with `make test`. It checks tile decoding,
+register mapping, scanline/frame timing, LCD disable behavior, and STAT edges.
+It also checks nested CALL/RET, taken and untaken conditional returns, RETI,
+and released joypad reads.
+
+Test suites are also provided for individual components:
 
 ```bash
 # Test CPU opcodes
-g++ -std=c++17 test_opcodes.cpp CPU.cpp Cartridge.cpp MMU.cpp -o test_opcodes
+g++ -std=c++17 test_opcodes.cpp CPU.cpp Cartridge.cpp MMU.cpp PPU.cpp -o test_opcodes
 ./test_opcodes
 
 # Test CB-prefixed opcodes
-g++ -std=c++17 test_cb_opcodes.cpp CPU.cpp Cartridge.cpp MMU.cpp -o test_cb_opcodes
+g++ -std=c++17 test_cb_opcodes.cpp CPU.cpp Cartridge.cpp MMU.cpp PPU.cpp -o test_cb_opcodes
 ./test_cb_opcodes
 
 # Test interrupt system
-g++ -std=c++17 test_interrupts.cpp CPU.cpp Cartridge.cpp MMU.cpp -o test_interrupts
+g++ -std=c++17 test_interrupts.cpp CPU.cpp Cartridge.cpp MMU.cpp PPU.cpp -o test_interrupts
 ./test_interrupts
 
 # Test timer
@@ -107,7 +141,7 @@ g++ -std=c++17 test_joypad.cpp Joypad.cpp -o test_joypad
 ./test_joypad
 
 # Test ROM loading
-g++ -std=c++17 test_rom_loading.cpp MMU.cpp Cartridge.cpp -o test_rom_loading
+g++ -std=c++17 test_rom_loading.cpp MMU.cpp Cartridge.cpp PPU.cpp -o test_rom_loading
 ./test_rom_loading
 ```
 
