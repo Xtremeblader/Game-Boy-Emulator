@@ -41,11 +41,13 @@ A C++ implementation of a Game Boy emulator, building a cycle-accurate CPU emula
   - **PPU** (Partial): 
     - LCD control registers (LCDC, STAT, etc.)
     - Scanline rendering pipeline (OAM search, pixel transfer, H-Blank, V-Blank)
-    - Background tile rendering
+    - Background and window tile rendering
+    - 8×8/8×16 sprites, palettes, flips, and DMG priority
+    - OAM DMA transfers (one byte per four CPU clocks)
     - Palette support (BGP, OBP0, OBP1)
 
 ### In Progress 🔄
-- Graphics rendering (sprites, window layer)
+- Graphics timing accuracy and memory-access restrictions
 - Serial communication interface
 - Real-time clock (RTC) in MBC3 cartridges
 
@@ -73,15 +75,24 @@ If your distribution does not package SDL3, install it using the
 [official SDL instructions](https://wiki.libsdl.org/SDL3/Installation).
 The display uses the SDL3 API, not SDL2.
 
-The window displays the 160×144 background at 4× size initially. Resize the
+The window displays the 160×144 framebuffer at 4× size initially. Resize the
 window as needed; Escape or closing the window exits. Emulation is paced to
-approximately 59.73 host frames per second. Keyboard gameplay input is not yet
-connected. Window-layer graphics, sprites, audio, and full game compatibility
-remain unfinished; a visible background does not imply a fully playable game.
-The Tetris startup smoke test now reaches the title screen. The unconnected
-joypad reports all buttons released to avoid triggering the game's soft reset.
-Keyboard input is still needed to start playing. Use `--test-pattern` to verify
-the graphics path independently.
+approximately 59.73 host frames per second. Keyboard input is connected. Click the emulator window to give it focus.
+
+| Keyboard | Game Boy |
+| --- | --- |
+| Arrow keys | D-pad |
+| Z | A |
+| X | B |
+| Enter | Start |
+| Backspace | Select |
+| Escape | Close emulator |
+
+Z/X use physical key positions. Keys stay pressed until released; switching
+away from the window releases all buttons. Audio and full game compatibility
+remain unfinished. Tetris and Pokémon Red reach their title screens; press
+Enter to advance, then use Z to confirm choices. Full gameplay and saves have
+not been verified.
 
 ### Graphics smoke test (no ROM needed)
 ```bash
@@ -102,34 +113,58 @@ including when the emulated LCD is disabled. Headless mode defaults to 60 such
 intervals. `--screenshot` saves the final framebuffer as a binary PPM image.
 The normal graphical run continues until you close it. Use `--help` for options.
 
+### Timer integration
+The CPU clock advances DIV and TIMA after each instruction. FF04–FF07 are
+mapped to the timer, and overflow requests the timer interrupt in IF. DIV
+continues counting when TIMA is disabled, so games can use it for randomness.
+A scripted Tetris run reproduced only square pieces without the timer and all
+seven piece types with it connected.
+
+The timer models selectable frequencies, DIV/TAC falling-edge ticks, a
+four-clock overflow reload delay, and cancellation by a TIMA write during that
+delay. CPU bus accesses still happen at instruction boundaries; exact writes
+during the reload cycle and STOP behavior are not yet modeled.
+
 ### Graphics implementation
 The CPU's elapsed clock cycles advance the PPU; MMU graphics register accesses
 are forwarded to it. VBlank and STAT requests set the CPU interrupt flags.
 The background renderer supports scrolling, both tile maps, signed/unsigned
-tile addressing, and the DMG background palette. Timing currently uses fixed
+tile addressing, and the DMG background palette. The window uses its own tile
+map and line counter. Sprites support both sizes, flipping, transparency,
+palettes, the ten-per-line limit, and DMG overlap/background priority. Writes
+to FF46 start a 160-byte OAM DMA transfer, advanced by CPU clock cycles.
+Timing currently uses fixed
 80/172/204-dot visible-line phases and ten VBlank lines; variable pixel-transfer
-timing and CPU VRAM/OAM access restrictions are not yet implemented.
+timing, exact window-trigger quirks, CPU VRAM/OAM access restrictions, and DMA
+bus restrictions/startup timing are not yet implemented.
 
 ## Testing
 
-Run the graphics regression suite with `make test`. It checks tile decoding,
+Run the regression suites with `make test`. Use `make test-input-sdl` to
+exercise real SDL keyboard events with the dummy video driver. Input tests
+cover all buttons, row selection, simultaneous inputs, interrupts, key repeat,
+and focus loss. It checks tile decoding,
 register mapping, scanline/frame timing, LCD disable behavior, and STAT edges.
 It also checks nested CALL/RET, taken and untaken conditional returns, RETI,
-and released joypad reads.
+and released joypad reads. Pokémon regression tests exhaustively check CP
+flags and exercise DMA timing/restarts, sprite transparency/priority/flipping,
+and window positioning/line counting. Timer tests check DIV, all four clock
+selections, register-write edges, delayed reload/cancellation, and CPU timer
+interrupt delivery.
 
 Test suites are also provided for individual components:
 
 ```bash
 # Test CPU opcodes
-g++ -std=c++17 test_opcodes.cpp CPU.cpp Cartridge.cpp MMU.cpp PPU.cpp -o test_opcodes
+g++ -std=c++17 test_opcodes.cpp CPU.cpp Cartridge.cpp MMU.cpp PPU.cpp Joypad.cpp Timer.cpp -o test_opcodes
 ./test_opcodes
 
 # Test CB-prefixed opcodes
-g++ -std=c++17 test_cb_opcodes.cpp CPU.cpp Cartridge.cpp MMU.cpp PPU.cpp -o test_cb_opcodes
+g++ -std=c++17 test_cb_opcodes.cpp CPU.cpp Cartridge.cpp MMU.cpp PPU.cpp Joypad.cpp Timer.cpp -o test_cb_opcodes
 ./test_cb_opcodes
 
 # Test interrupt system
-g++ -std=c++17 test_interrupts.cpp CPU.cpp Cartridge.cpp MMU.cpp PPU.cpp -o test_interrupts
+g++ -std=c++17 test_interrupts.cpp CPU.cpp Cartridge.cpp MMU.cpp PPU.cpp Joypad.cpp Timer.cpp -o test_interrupts
 ./test_interrupts
 
 # Test timer
@@ -141,7 +176,7 @@ g++ -std=c++17 test_joypad.cpp Joypad.cpp -o test_joypad
 ./test_joypad
 
 # Test ROM loading
-g++ -std=c++17 test_rom_loading.cpp MMU.cpp Cartridge.cpp PPU.cpp -o test_rom_loading
+g++ -std=c++17 test_rom_loading.cpp MMU.cpp Cartridge.cpp PPU.cpp Joypad.cpp Timer.cpp -o test_rom_loading
 ./test_rom_loading
 ```
 
@@ -179,8 +214,7 @@ gb_emulatorproj/
 - Proper EI instruction 1-cycle delay
 
 ## Known Limitations
-- Graphics rendering incomplete (background rendering only)
-- No sprite support yet
+- Graphics timing and bus-access restrictions are simplified
 - No audio/sound
 - Limited game compatibility (mainly CPU-focused)
 - No save state support

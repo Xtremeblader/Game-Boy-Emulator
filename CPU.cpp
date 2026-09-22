@@ -60,6 +60,8 @@ void CPU::and8bit(uint8_t value){
 
 void CPU::compare(uint8_t value){
     int result = AF.bytes.hi - value;
+    if(result < 0) setFlag(CARRY);
+    else clearFlag(CARRY);
     if(result == 0){
         setFlag(ZERO);
     } else {

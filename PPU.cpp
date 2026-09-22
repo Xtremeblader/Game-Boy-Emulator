@@ -63,6 +63,7 @@ void PPU::update(int cycles){
                 ly = ++current_scanline;
                 if(ly == 154){
                     ly = current_scanline = 0;
+                    window_line = 0;
                     current_mode = OAM_SEARCH;
                 }
                 break;
@@ -73,59 +74,14 @@ void PPU::update(int cycles){
 
 void PPU::renderScanline(){
     if(current_scanline >= 144) return;
-    
-    // Simple background rendering for now
-    uint16_t* scanline_ptr = framebuffer.data() + (current_scanline * 160);
-    
-    if(!backgroundEnabled()){
-        std::fill(scanline_ptr, scanline_ptr + 160, 0x7FFF);
-        return;
+    background_colors.fill(0);
+    auto* pixels = framebuffer.data() + current_scanline * 160;
+    std::fill(pixels, pixels + 160, 0x7FFF);
+    if(backgroundEnabled()){
+        renderBackgroundScanline();
+        renderWindowScanline();
     }
-
-    // Calculate which tile row we're in
-    uint8_t scroll_y = scy + current_scanline;
-    uint8_t tile_row = scroll_y / 8;
-    uint8_t tile_pixel_y = scroll_y % 8;
-    
-    uint16_t tile_map_addr;
-    if(useAlternateBGMap()){
-        tile_map_addr = 0x9C00;  // Alternate map
-    } else {
-        tile_map_addr = 0x9800;  // Default map
-    }
-    
-    // Render each pixel across the scanline
-    for(uint16_t x = 0; x < 160; x++){
-        uint8_t scroll_x = scx + x;
-        uint8_t tile_col = scroll_x / 8;
-        uint8_t tile_pixel_x = scroll_x % 8;
-        
-        // Get tile index from map
-        uint16_t map_addr = tile_map_addr + (tile_row % 32) * 32 + (tile_col % 32);
-        uint8_t tile_index = mmu.readByte(map_addr);
-        
-        // Get tile data
-        uint16_t tile_data_addr;
-        if((lcdc & (1 << 4)) == 0){
-            // Tile data at 0x8800-0x97FF(contains signed tile numbers)
-            tile_data_addr = 0x8800 + ((static_cast<int8_t>(tile_index)) + 128) * 16;
-        } else {
-            // Tile data at 0x8000-0x8FFF(unsigned tile numbers)
-            tile_data_addr = 0x8000 + tile_index * 16;
-        }
-        
-        // Get pixel from tile
-        uint16_t tile_line_addr = tile_data_addr + tile_pixel_y * 2;
-        uint8_t low = mmu.readByte(tile_line_addr);
-        uint8_t high = mmu.readByte(tile_line_addr + 1);
-        
-        // Extract pixel(bit 7 is leftmost)
-        uint8_t pixel_bit = 7 - tile_pixel_x;
-        uint8_t palette_index = ((high >> pixel_bit) & 1) << 1 | ((low >> pixel_bit) & 1);
-        
-        // Convert palette to color
-        scanline_ptr[x] = colorToRGB555(palette_index, bgp);
-    }
+    if(spritesEnabled()) renderSpriteScanline();
 }
 
 uint16_t PPU::colorToRGB555(uint8_t pixel, uint8_t palette){
@@ -158,6 +114,7 @@ void PPU::writeLCDC(uint8_t value){
     if(was_enabled != isPPUEnabled()){
         cycles_in_mode = 0;
         ly = current_scanline = 0;
+        window_line = 0;
         current_mode = isPPUEnabled() ? OAM_SEARCH : HBLANK;
         frame_ready = vblank_interrupt = lcd_stat_interrupt = false;
         if(!isPPUEnabled()){
@@ -208,13 +165,73 @@ uint8_t PPU::readWX() const { return wx; }
 void PPU::writeWX(uint8_t value){ wx = value; }
 
 void PPU::renderBackgroundScanline(){
-    // Placeholder for future full background rendering
+    const int y = (scy + current_scanline) & 255;
+    for(int x = 0; x < 160; ++x){
+        int bx = (scx + x) & 255;
+        uint16_t map = useAlternateBGMap() ? 0x9C00 : 0x9800;
+        uint8_t tile = mmu.readByte(map + (y / 8) * 32 + bx / 8);
+        int address = (lcdc & 0x10) ? 0x8000 + tile * 16 :
+                      0x9000 + static_cast<int8_t>(tile) * 16;
+        address += (y % 8) * 2;
+        int bit = 7 - bx % 8;
+        uint8_t color = ((mmu.readByte(address) >> bit) & 1) |
+                        (((mmu.readByte(address + 1) >> bit) & 1) << 1);
+        background_colors[x] = color;
+        framebuffer[current_scanline * 160 + x] = colorToRGB555(color, bgp);
+    }
 }
 
 void PPU::renderWindowScanline(){
-    // Placeholder for future window rendering
+    if(!isWindowEnabled() || current_scanline < wy || wx > 166) return;
+    int left = static_cast<int>(wx) - 7;
+    for(int x = std::max(0, left); x < 160; ++x){
+        int local_x = x - left;
+        uint16_t map = useAlternateWindowMap() ? 0x9C00 : 0x9800;
+        uint8_t tile = mmu.readByte(map + (window_line / 8) * 32 + local_x / 8);
+        int address = (lcdc & 0x10) ? 0x8000 + tile * 16 :
+                      0x9000 + static_cast<int8_t>(tile) * 16;
+        address += (window_line % 8) * 2;
+        int bit = 7 - local_x % 8;
+        uint8_t color = ((mmu.readByte(address) >> bit) & 1) |
+                        (((mmu.readByte(address + 1) >> bit) & 1) << 1);
+        background_colors[x] = color;
+        framebuffer[current_scanline * 160 + x] = colorToRGB555(color, bgp);
+    }
+    ++window_line;
 }
 
 void PPU::renderSpriteScanline(){
-    // Placeholder for future sprite rendering
+    struct Sprite { int x, y; uint8_t tile, flags; };
+    std::array<Sprite, 10> selected{};
+    int count = 0, height = useLargeSpriteSize() ? 16 : 8;
+    // Select the first ten intersecting OAM entries, even if horizontally hidden.
+    for(int i = 0; i < 40 && count < 10; ++i){
+        int address = 0xFE00 + i * 4;
+        int y = static_cast<int>(mmu.readByte(address)) - 16;
+        if(current_scanline < y || current_scanline >= y + height) continue;
+        selected[count++] = {static_cast<int>(mmu.readByte(address + 1)) - 8,
+                             y, mmu.readByte(address + 2), mmu.readByte(address + 3)};
+    }
+    std::stable_sort(selected.begin(), selected.begin() + count,
+                     [](const Sprite& a, const Sprite& b){ return a.x < b.x; });
+    std::array<bool, 160> claimed{};
+    for(int i = 0; i < count; ++i){
+        const auto& sprite = selected[i];
+        int row = current_scanline - sprite.y;
+        if(sprite.flags & 0x40) row = height - 1 - row;
+        int tile = height == 16 ? sprite.tile & 0xFE : sprite.tile;
+        int address = 0x8000 + tile * 16 + row * 2;
+        uint8_t low = mmu.readByte(address), high = mmu.readByte(address + 1);
+        for(int dx = 0; dx < 8; ++dx){
+            int x = sprite.x + dx;
+            if(x < 0 || x >= 160 || claimed[x]) continue;
+            int bit = (sprite.flags & 0x20) ? dx : 7 - dx;
+            uint8_t color = ((low >> bit) & 1) | (((high >> bit) & 1) << 1);
+            if(!color) continue;
+            claimed[x] = true;
+            if((sprite.flags & 0x80) && background_colors[x]) continue;
+            framebuffer[current_scanline * 160 + x] =
+                colorToRGB555(color, (sprite.flags & 0x10) ? obp1 : obp0);
+        }
+    }
 }

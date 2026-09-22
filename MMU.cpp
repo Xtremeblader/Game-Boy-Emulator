@@ -1,5 +1,7 @@
 #include "MMU.h"
 #include "PPU.h"
+#include "Joypad.h"
+#include "Timer.h"
 #include "Cartridge.h"
 #include <fstream>
 #include <iostream>
@@ -25,8 +27,15 @@ void MMU::linkInterruptRegisters(uint8_t* ie_ptr, uint8_t* if_ptr){
 }
 
 uint8_t MMU::readByte(uint16_t address) const {
-    // Until host input is connected, all active-low joypad inputs are released.
-    if(address == 0xFF00) return (io_registers[0] & 0x30) | 0xCF;
+    if(timer){
+        switch(address){
+            case 0xFF04: return timer->readDIV();
+            case 0xFF05: return timer->readTIMA();
+            case 0xFF06: return timer->readTMA();
+            case 0xFF07: return timer->readTAC();
+        }
+    }
+    if(address == 0xFF00) return joypad ? joypad->read() : (io_registers[0] & 0x30) | 0xCF;
     if(address == 0xFFFF && IE_ptr) return *IE_ptr;
     if(ppu){
         switch(address){
@@ -101,6 +110,25 @@ uint8_t MMU::readByte(uint16_t address) const {
 }
 
 void MMU::writeByte(uint16_t address, uint8_t value){
+    if(timer){
+        switch(address){
+            case 0xFF04: timer->writeDIV(value); return;
+            case 0xFF05: timer->writeTIMA(value); return;
+            case 0xFF06: timer->writeTMA(value); return;
+            case 0xFF07: timer->writeTAC(value); return;
+        }
+    }
+    if(address == 0xFF00 && joypad){
+        joypad->write(value);
+        syncJoypadInterrupt();
+        return;
+    }
+    if(address == 0xFF46){
+        io_registers[0x46] = value;
+        dma_source = static_cast<uint16_t>(value) << 8;
+        dma_index = dma_cycles = 0;
+        return;
+    }
     if(address == 0xFFFF && IE_ptr){ *IE_ptr = value; return; }
     if(ppu){
         switch(address){
@@ -194,4 +222,32 @@ void MMU::writeWord(uint16_t address, uint16_t value){
 bool MMU::loadROM(const std::string& filepath){
     // Legacy function - delegates to loadCartridge
     return loadCartridge(filepath);
+}
+
+void MMU::updateDMA(int cycles){
+    if(dma_index >= 160) return;
+    dma_cycles += cycles;
+    while(dma_cycles >= 4 && dma_index < 160){
+        dma_cycles -= 4;
+        oam[dma_index] = readByte(dma_source + dma_index);
+        ++dma_index;
+    }
+}
+
+void MMU::syncJoypadInterrupt(){
+    if(joypad && joypad->hasInterrupt()){
+        if(IF_ptr) *IF_ptr |= 0x10;
+        else io_registers[0x0F] |= 0x10;
+        joypad->clearInterrupt();
+    }
+}
+
+void MMU::updateTimer(int cycles){
+    if(!timer) return;
+    timer->update(cycles);
+    if(timer->hasInterrupt()){
+        if(IF_ptr) *IF_ptr |= 0x04;
+        else io_registers[0x0F] |= 0x04;
+        timer->clearInterrupt();
+    }
 }

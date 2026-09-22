@@ -9,20 +9,20 @@ public:
     void update(int cycles);
     
     // Check if timer interrupt was generated
-    bool hasInterrupt(){ return timer_interrupt; }
+    bool hasInterrupt() const { return timer_interrupt; }
     void clearInterrupt(){ timer_interrupt = false; }
     
     // I/O Register accessors(0xFF04-0xFF07)
     uint8_t readDIV() const { return static_cast<uint8_t>((internal_counter >> 8) & 0xFF); }
-    void writeDIV(uint8_t value){ internal_counter = 0; }
+    void writeDIV(uint8_t value);
     
     uint8_t readTIMA() const { return tima; }
-    void writeTIMA(uint8_t value){ tima = value; }
+    void writeTIMA(uint8_t value);
     
     uint8_t readTMA() const { return tma; }
     void writeTMA(uint8_t value){ tma = value; }
     
-    uint8_t readTAC() const { return tac; }
+    uint8_t readTAC() const { return tac | 0xF8; }
     void writeTAC(uint8_t value);
     
 private:
@@ -34,12 +34,13 @@ private:
     uint8_t tma;   // 0xFF06 - Timer modulo(reload value)
     uint8_t tac;   // 0xFF07 - Timer control
     
-    // Previous state of the falling edge detector
-    bool prev_edge_detector;
+    int reload_delay = 0;
     
     // Interrupt flag
     bool timer_interrupt;
     
     // Helper
     uint16_t getTimerBit() const;
+    bool inputHigh() const;
+    void tick();
 };

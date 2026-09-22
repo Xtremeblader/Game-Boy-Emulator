@@ -16,60 +16,25 @@ void Joypad::release(Button button){
 }
 
 void Joypad::setButtonState(Button button, bool pressed){
-    uint8_t* target_state;
-    uint8_t previous_value;
-    
-    if(button < 4){
-        // D-Pad button(0-3)
-        target_state = &dpad_state;
-    } else {
-        // Action button(4-7) - map to 0-3
-        button = static_cast<Button>(button - 4);
-        target_state = &button_state;
-    }
-    
-    previous_value = *target_state;
-    
-    if(pressed){
-        // Press: clear the bit(0 = pressed)
-        *target_state &= ~(1 << button);
-    } else {
-        // Release: set the bit(1 = released)
-        *target_state |= (1 << button);
-    }
-    
-    // Generate interrupt if state changed(only on press)
-    if(pressed && ((previous_value & (1 << button)) != 0)){
-        interrupt_triggered = true;
-    }
+    if(button < RIGHT || button > START) return;
+    uint8_t previous = read();
+    uint8_t& state = button < 4 ? dpad_state : button_state;
+    int bit = static_cast<int>(button) % 4;
+    if(pressed) state &= ~(1 << bit);
+    else state |= 1 << bit;
+    if(previous & ~read() & 0x0F) interrupt_triggered = true;
 }
 
-uint8_t Joypad::read(){
-    // Reading JOYPAD register(0xFF00)
-    // Bits 7-6: Unused(always 1)
-    // Bit 5: P15 - D-Pad row select(0 = select D-Pad)
-    // Bit 4: P14 - Button row select(0 = select buttons)
-    // Bits 3-0: D3-D0 - Selected input state
-    
-    uint8_t result = joypad_register & 0xF0;  // Keep bits 4-7
-    
-    if((joypad_register & 0x20) == 0){
-        // D-Pad is selected(bit 5 = 0)
-        result |= dpad_state;
-    } else if((joypad_register & 0x10) == 0){
-        // Buttons are selected(bit 4 = 0)
-        result |= button_state;
-    } else {
-        // Neither selected(both bits set)
-        result |= 0x0F;
-    }
-    
-    return result;
+uint8_t Joypad::read() const {
+    uint8_t inputs = 0x0F;
+    if(!(joypad_register & 0x10)) inputs &= dpad_state;
+    if(!(joypad_register & 0x20)) inputs &= button_state;
+    return 0xC0 | (joypad_register & 0x30) | inputs;
 }
 
 void Joypad::write(uint8_t value){
-    // Writing to JOYPAD register selects which buttons to read
-    // Only bits 4-5 are used for selection
-    joypad_register = (value & 0xF0) | 0x0F;
+    uint8_t previous = read();
+    joypad_register = value & 0x30;
+    // Selecting a row with a held key can also produce a falling input edge.
+    if(previous & ~read() & 0x0F) interrupt_triggered = true;
 }
-

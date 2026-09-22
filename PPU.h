@@ -104,6 +104,9 @@ private:
     bool stat_line = false;
     void updateStatInterrupt();
 
+    std::array<uint8_t, 160> background_colors{};
+    int window_line = 0;
+
     // Rendering helpers
     void renderScanline();
     void renderBackgroundScanline();

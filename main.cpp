@@ -2,6 +2,8 @@
 #include "CPU.h"
 #include "PPU.h"
 #include "Display.h"
+#include "Joypad.h"
+#include "Timer.h"
 #include <chrono>
 #include <fstream>
 #include <iostream>
@@ -38,6 +40,10 @@ int main(int argc, char* argv[]){
     MMU mmu;
     CPU cpu(mmu);
     PPU ppu(mmu);
+    Joypad joypad;
+    Timer timer;
+    mmu.linkTimer(&timer);
+    mmu.linkJoypad(&joypad);
     mmu.linkPPU(&ppu);
     if(pattern){
         mmu.writeByte(0xFF47, 0xE4);
@@ -60,11 +66,14 @@ int main(int argc, char* argv[]){
     int budget = 0;
     // Host frames keep events responsive even when the ROM disables the LCD.
     while(!limit || frames < limit){
-        if(!headless && !display.poll()) break;
+        if(!headless && !display.poll(joypad)) break;
+        mmu.syncJoypadInterrupt();
         budget += 70224;
         while(budget > 0){
             int elapsed = pattern ? 4 : cpu.step();
             if(elapsed <= 0){ std::cerr << "CPU returned invalid timing\n"; return 1; }
+            mmu.updateTimer(elapsed);
+            mmu.updateDMA(elapsed);
             ppu.update(elapsed);
             cycles += elapsed;
             budget -= elapsed;

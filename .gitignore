@@ -51,3 +51,11 @@ include/external/
 /*.ppm
 
 /test-cpu-control
+
+/test-pokemon-graphics
+
+/test-input
+/test-input-sdl-bin
+
+/test-timer
+/test-timer-bus

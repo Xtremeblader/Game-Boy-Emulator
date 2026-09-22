@@ -6,6 +6,8 @@
 
 class Cartridge;
 class PPU;
+class Joypad;
+class Timer;
 
 class MMU {
 public:
@@ -16,6 +18,13 @@ public:
     bool loadCartridge(const std::string& filepath);
     Cartridge* getCartridge() const { return cartridge.get(); }
     
+    void updateDMA(int cycles);
+    void linkTimer(Timer* value) { timer = value; }
+    void updateTimer(int cycles);
+
+    void linkJoypad(Joypad* value) { joypad = value; }
+    void syncJoypadInterrupt();
+
     void linkPPU(PPU* value) { ppu = value; }
 
     // Link interrupt registers for I/O mapping
@@ -35,6 +44,11 @@ public:
 private:
     std::unique_ptr<Cartridge> cartridge;
     PPU* ppu = nullptr;
+    Joypad* joypad = nullptr;
+    Timer* timer = nullptr;
+    int dma_index = 160;
+    int dma_cycles = 0;
+    uint16_t dma_source = 0;
     
     // Internal RAM and I/O
     // 0x0000-0x3FFF: ROM Bank 0 (from cartridge)
