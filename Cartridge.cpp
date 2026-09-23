@@ -2,8 +2,17 @@
 #include <fstream>
 #include <iostream>
 #include <iomanip>
+#include <filesystem>
+#include <cerrno>
+#include <cstring>
+#include <unistd.h>
+#include <cstdio>
 
 bool Cartridge::loadFromFile(const std::string& filepath){
+    if(!saveBattery()) return false;
+    save_ready = false;
+    ram_dirty = false;
+    ram_data.clear();
     std::ifstream file(filepath, std::ios::binary);
     if(!file.is_open()){
         std::cerr << "Failed to open ROM: " << filepath << std::endl;
@@ -63,7 +72,16 @@ bool Cartridge::loadFromFile(const std::string& filepath){
     // Initialize banking
     current_rom_bank = 1;
     current_ram_bank = 0;
-    ram_enabled = false;
+    ram_enabled = type == ROM_RAM || type == ROM_RAM_BATTERY;
+    std::error_code path_error;
+    auto rom_path = std::filesystem::absolute(filepath, path_error);
+    if(path_error){ std::cerr << "Cannot resolve ROM path: " << path_error.message() << '\n'; return false; }
+    auto battery_path = rom_path;
+    battery_path.replace_extension(".sav");
+    if(battery_path == rom_path) battery_path += ".sav";
+    save_path = battery_path.string();
+    if(!loadBattery()) return false;
+
     
     // Print info
     std::cout << "==== Cartridge Loaded ====" << std::endl;
@@ -153,7 +171,7 @@ void Cartridge::writeRomByte(uint16_t address, uint8_t value){
     // Writes to ROM area are used for bank switching(MBC1, MBC3, MBC5)
     // These don't actually write to ROM, they control bank switching
     
-    if(type == MBC1){
+    if(type == MBC1 || type == MBC1_RAM || type == MBC1_RAM_BATTERY){
         if(address >= 0x2000 && address < 0x4000){
             // ROM bank select(lower 5 bits)
             int bank = value & 0x1F;
@@ -192,7 +210,7 @@ void Cartridge::writeRomByte(uint16_t address, uint8_t value){
         }
     }
     
-    if(address >= 0x0000 && address < 0x2000){
+    if(type != ROM_ONLY && type != ROM_RAM && type != ROM_RAM_BATTERY && address < 0x2000){
         // RAM enable(all MBCs)
         ram_enabled = (value & 0x0F) == 0x0A;
     }
@@ -224,7 +242,10 @@ void Cartridge::writeRamByte(uint16_t address, uint8_t value){
         uint32_t ram_address = static_cast<uint32_t>(current_ram_bank) * 0x2000 + rel_address;
         
         if(ram_address < ram_data.size()){
-            ram_data[ram_address] = value;
+            if(ram_data[ram_address] != value){
+                ram_data[ram_address] = value;
+                ram_dirty = true;
+            }
         }
     }
 }
@@ -248,5 +269,67 @@ void Cartridge::setRamBank(int bank){
 
 bool Cartridge::validateChecksum(){
     // TODO: Implement checksum validation
+    return true;
+}
+
+Cartridge::~Cartridge(){
+    saveBattery();
+}
+
+bool Cartridge::loadBattery(){
+    if(!has_battery || ram_data.empty()) return true;
+    std::error_code error;
+    bool exists = std::filesystem::exists(save_path, error);
+    if(error){
+        std::cerr << "Cannot inspect save " << save_path << ": " << error.message() << '\n';
+        return false;
+    }
+    if(exists){
+        auto size = std::filesystem::file_size(save_path, error);
+        if(error || size != ram_data.size()){
+            std::cerr << "Cannot load save " << save_path << ": expected "
+                      << ram_data.size() << " bytes. Existing save left unchanged.\n";
+            return false;
+        }
+        std::ifstream input(save_path, std::ios::binary);
+        if(!input.read(reinterpret_cast<char*>(ram_data.data()), ram_data.size())){
+            std::cerr << "Cannot read save: " << save_path << '\n';
+            return false;
+        }
+        std::cout << "Loaded battery save: " << save_path << '\n';
+    }
+    save_ready = true;
+    return true;
+}
+
+bool Cartridge::saveBattery(){
+    if(!save_ready || !ram_dirty) return true;
+    // Unique temporary file in the same directory: a failed write never truncates
+    // the previous save, and rename replaces it only after the full write succeeds.
+    std::string pattern = save_path + ".tmp.XXXXXX";
+    std::vector<char> name(pattern.begin(), pattern.end());
+    name.push_back('\0');
+    int fd = mkstemp(name.data());
+    if(fd < 0){
+        std::cerr << "Cannot create battery save " << save_path << ": " << std::strerror(errno) << '\n';
+        return false;
+    }
+    size_t written = 0;
+    bool ok = true;
+    while(written < ram_data.size()){
+        ssize_t count = ::write(fd, ram_data.data() + written, ram_data.size() - written);
+        if(count < 0 && errno == EINTR) continue;
+        if(count <= 0){ ok = false; break; }
+        written += static_cast<size_t>(count);
+    }
+    if(ok && fsync(fd) != 0) ok = false;
+    if(close(fd) != 0) ok = false;
+    if(ok && std::rename(name.data(), save_path.c_str()) != 0) ok = false;
+    if(!ok){
+        std::cerr << "Failed to write battery save: " << save_path << ". Previous save left unchanged.\n";
+        std::remove(name.data());
+        return false;
+    }
+    ram_dirty = false;
     return true;
 }

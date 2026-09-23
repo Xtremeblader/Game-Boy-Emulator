@@ -37,6 +37,13 @@ public:
         RAM_64KB = 0x10000,
     };
     
+    Cartridge() = default;
+    Cartridge(const Cartridge&) = delete;
+    Cartridge& operator=(const Cartridge&) = delete;
+    ~Cartridge();
+    bool saveBattery();
+    const std::string& getSavePath() const { return save_path; }
+
     bool loadFromFile(const std::string& filepath);
     
     // Accessors
@@ -64,6 +71,11 @@ public:
     bool isRamEnabled() const { return ram_enabled; }
     
 private:
+    std::string save_path;
+    bool save_ready = false;
+    bool ram_dirty = false;
+    bool loadBattery();
+
     // ROM data
     std::vector<uint8_t> rom_data;
     std::vector<uint8_t> ram_data;

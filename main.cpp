@@ -4,11 +4,18 @@
 #include "Display.h"
 #include "Joypad.h"
 #include "Timer.h"
+#include "Cartridge.h"
+#include <csignal>
 #include <chrono>
 #include <fstream>
 #include <iostream>
 #include <string>
 #include <thread>
+
+namespace {
+volatile std::sig_atomic_t stop_requested = 0;
+void requestStop(int){ stop_requested = 1; }
+}
 
 int main(int argc, char* argv[]){
     bool headless = false, pattern = false;
@@ -53,6 +60,8 @@ int main(int argc, char* argv[]){
             mmu.writeByte(0x8001 + row * 2, 0x0F);
         }
     } else if(!mmu.loadCartridge(rom)) return 1;
+    std::signal(SIGINT, requestStop);
+    std::signal(SIGTERM, requestStop);
     Display display;
     if(!headless && !display.open()){
         std::cerr << "Display error: " << display.error() << '\n';
@@ -65,7 +74,7 @@ int main(int argc, char* argv[]){
     unsigned long long frames = 0, cycles = 0;
     int budget = 0;
     // Host frames keep events responsive even when the ROM disables the LCD.
-    while(!limit || frames < limit){
+    while(!stop_requested && (!limit || frames < limit)){
         if(!headless && !display.poll(joypad)) break;
         mmu.syncJoypadInterrupt();
         budget += 70224;
@@ -94,12 +103,14 @@ int main(int argc, char* argv[]){
             }
         }
         ++frames;
+        if(frames % 300 == 0 && mmu.getCartridge() && !mmu.getCartridge()->saveBattery()) return 1;
         if(!headless){
             deadline += frame_time;
             std::this_thread::sleep_until(deadline);
             if(Clock::now() - deadline > frame_time * 4) deadline = Clock::now();
         }
     }
+    if(mmu.getCartridge() && !mmu.getCartridge()->saveBattery()) return 1;
     if(!screenshot.empty()){
         std::ofstream output(screenshot, std::ios::binary);
         output << "P6\n160 144\n255\n";

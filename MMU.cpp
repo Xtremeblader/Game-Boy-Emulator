@@ -17,8 +17,11 @@ MMU::MMU() : cartridge(nullptr){
 MMU::~MMU() = default;
 
 bool MMU::loadCartridge(const std::string& filepath){
-    cartridge = std::make_unique<Cartridge>();
-    return cartridge->loadFromFile(filepath);
+    if(cartridge && !cartridge->saveBattery()) return false;
+    auto next = std::make_unique<Cartridge>();
+    if(!next->loadFromFile(filepath)) return false;
+    cartridge = std::move(next);
+    return true;
 }
 
 void MMU::linkInterruptRegisters(uint8_t* ie_ptr, uint8_t* if_ptr){

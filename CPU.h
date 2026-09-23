@@ -58,7 +58,9 @@ public:
 private:
     MMU& mmu;
     
-    uint8_t ime_scheduled;  // Counts down for EI 1-cycle delay
+    uint8_t ime_scheduled;  // Instructions remaining before EI takes effect
+    bool halted = false;
+    bool halt_bug = false;
     
     uint8_t fetchByte();
     uint16_t fetchWord();
@@ -129,7 +131,7 @@ private:
     void pushWord(uint16_t value);               // Push 16-bit value to stack
     uint16_t popWord();                         // Pop 16-bit value from stack
 
-    // Interrupt Control(note: interrupt state tracking should be added later)
+    // Interrupt control
     void enableInterrupts();
     void disableInterrupts();
 

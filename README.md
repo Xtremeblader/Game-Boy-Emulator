@@ -10,7 +10,7 @@ A C++ implementation of a Game Boy emulator, building a cycle-accurate CPU emula
   - CB-prefixed opcodes (all 256 extended instructions)
   - Full flag system (Zero, Subtract, Half-Carry, Carry)
   - Interrupt handling (V-Blank, LCD STAT, Timer, Serial, Joypad)
-  - EI/DI interrupt control with proper 1-cycle delay
+  - EI/DI interrupt control with a one-instruction EI delay
   - Stack operations (PUSH/POP)
   - All arithmetic operations (ADD, SUB, INC, DEC, etc.)
   - All bitwise operations (AND, OR, XOR, bit ops)
@@ -33,7 +33,7 @@ A C++ implementation of a Game Boy emulator, building a cycle-accurate CPU emula
   - MBC5
   - Header parsing and validation
   - ROM and RAM banking
-  - Battery backup support detection
+  - Battery-backed RAM loading, periodic saves, and shutdown saves
 
 - **Peripherals**
   - **Timer**: TAC/TIMA/TMA registers with falling-edge detection
@@ -91,8 +91,8 @@ approximately 59.73 host frames per second. Keyboard input is connected. Click t
 Z/X use physical key positions. Keys stay pressed until released; switching
 away from the window releases all buttons. Audio and full game compatibility
 remain unfinished. Tetris and Pokémon Red reach their title screens; press
-Enter to advance, then use Z to confirm choices. Full gameplay and saves have
-not been verified.
+Enter to advance, then use Z to confirm choices. Full gameplay has not been verified. Battery-backed cartridge RAM is saved
+automatically as described below.
 
 ### Graphics smoke test (no ROM needed)
 ```bash
@@ -112,6 +112,36 @@ make headless
 including when the emulated LCD is disabled. Headless mode defaults to 60 such
 intervals. `--screenshot` saves the final framebuffer as a binary PPM image.
 The normal graphical run continues until you close it. Use `--help` for options.
+
+### Battery saves
+Use the game's own SAVE command first (for example, SAVE in Pokémon's menu).
+Battery-backed cartridge RAM is restored automatically on launch from a raw
+`.sav` file next to the ROM: `Pokemon Red.gb` uses `Pokemon Red.sav`.
+
+Changed RAM is written every 300 emulated frames (about five seconds), when
+you close the window or press Escape, and on Ctrl+C/SIGTERM. Headless runs
+also save when their frame limit is reached. These are cartridge saves, not
+snapshots of the CPU or the current screen. Games without battery-backed RAM
+(such as Tetris) do not create save files.
+
+Saves contain all allocated RAM banks. Writes go to a unique temporary file
+in the same directory, then replace the old save after a successful write and
+flush. Save failures are reported; malformed or unreadable existing saves
+stop ROM loading instead of being overwritten. The ROM directory must be
+writable. Save files and temporary save files are ignored by Git.
+
+RTC state and unsupported cartridge controllers (including MBC2) are not
+persisted. Avoid running two instances with the same ROM/save path at once.
+A forced kill can lose changes since the last periodic save.
+
+### CPU HALT and interrupt timing
+HALT pauses instruction fetches while the emulator continues advancing the
+PPU, timer, and DMA in four-clock steps. Enabled pending interrupts wake the
+CPU; IME determines whether it services the interrupt or resumes execution.
+The DMG HALT bug and EI/HALT interaction are modeled. EI enables interrupts
+after the next instruction, DI cancels a pending enable, and RETI enables
+interrupts immediately. `make test` includes wakeup and peripheral-clock tests.
+Instruction-internal interrupt sampling and STOP remain simplified.
 
 ### Timer integration
 The CPU clock advances DIV and TIMA after each instruction. FF04–FF07 are
@@ -211,7 +241,7 @@ gb_emulatorproj/
 ### Interrupt System
 - Five interrupt types with priority handling
 - Interrupt Master Enable (IME) flag
-- Proper EI instruction 1-cycle delay
+- EI takes effect after the following instruction completes
 
 ## Known Limitations
 - Graphics timing and bus-access restrictions are simplified

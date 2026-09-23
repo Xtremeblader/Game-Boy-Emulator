@@ -25,23 +25,20 @@ uint16_t CPU::fetchWord(){
 }
 
 int CPU::step(){
-    // Handle EI(Enable Interrupts) 1-cycle delay
-    if(ime_scheduled > 0){
-        ime_scheduled--;
-        if(ime_scheduled == 0){
-            IME = true;
-        }
+    if(halted){
+        if(!(IE & IF & 0x1F)) return 4; // Peripherals keep receiving clock cycles.
+        halted = false;
     }
-    
-    // Check for interrupts if IME is enabled
     int interrupt_cycles = checkInterrupts();
-    if(interrupt_cycles > 0){
-        return interrupt_cycles;
-    }
-    
-    // Execute next instruction
-    uint8_t opcode = fetchByte();
-    return execute(opcode);
+    if(interrupt_cycles) return interrupt_cycles;
+
+    uint8_t opcode = mmu.readByte(PC);
+    if(halt_bug) halt_bug = false;
+    else ++PC;
+    int cycles = execute(opcode);
+    // EI becomes effective only after the following instruction completes.
+    if(ime_scheduled && --ime_scheduled == 0) IME = true;
+    return cycles;
 }
 
 void CPU::and8bit(uint8_t value){
@@ -609,6 +606,11 @@ void CPU::serviceInterrupt(InterruptType type){
     // Disable interrupts while servicing
     IME = false;
     
+    ime_scheduled = 0;
+    halted = false;
+    // EI; HALT with a pending interrupt repeats HALT after the handler returns.
+    if(halt_bug){ --PC; halt_bug = false; }
+
     // Clear the interrupt flag
     IF &= ~(1 << type);
     
@@ -621,7 +623,7 @@ void CPU::serviceInterrupt(InterruptType type){
 
 // Interrupt Control
 void CPU::enableInterrupts(){
-    ime_scheduled = 1;
+    if(!IME && !ime_scheduled) ime_scheduled = 2;
 }
 
 void CPU::disableInterrupts(){
@@ -1285,7 +1287,10 @@ int CPU::execute(uint8_t opcode){
         case 0x73: mmu.writeByte(HL.reg, DE.bytes.lo); return 8;   // LD(HL),E
         case 0x74: mmu.writeByte(HL.reg, HL.bytes.hi); return 8;   // LD(HL),H
         case 0x75: mmu.writeByte(HL.reg, HL.bytes.lo); return 8;   // LD(HL),L
-        case 0x76: return 4;                                        // HALT
+        case 0x76: // HALT
+            if(!IME && (IE & IF & 0x1F)) halt_bug = true;
+            else halted = true;
+            return 4;
         case 0x77: mmu.writeByte(HL.reg, AF.bytes.hi); return 8;   // LD(HL),A
         
         // LD A, x(0x78-0x7F)
@@ -1457,7 +1462,7 @@ int CPU::execute(uint8_t opcode){
         case 0xD6: sub8(AF.bytes.hi, fetchByte()); return 8;       // SUB d8
         case 0xD7: pushWord(PC); PC = 0x10; return 16;             // RST 10H
         case 0xD8: if(getFlag(CARRY)){ PC = popWord(); return 20; } return 8;  // RET C
-        case 0xD9: PC = popWord(); IME = true; return 16;                      // RETI
+        case 0xD9: PC = popWord(); IME = true; ime_scheduled = 0; return 16;                      // RETI
         case 0xDA: {                                                // JP C,a16
             uint16_t addr = fetchWord();
             if(getFlag(CARRY)){ PC = addr; return 16; }

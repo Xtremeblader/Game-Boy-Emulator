@@ -59,3 +59,10 @@ include/external/
 
 /test-timer
 /test-timer-bus
+
+/test-halt
+
+# Battery-backed cartridge RAM
+*.sav
+*.sav.tmp.*
+/test-battery

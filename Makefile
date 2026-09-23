@@ -14,13 +14,15 @@ headless: emulator-headless
 emulator-headless: main.cpp Display.cpp $(CORE) $(HEADERS)
 	$(CXX) $(CXXFLAGS) main.cpp Display.cpp $(CORE) -o $@
 
-test: test-graphics test-cpu-control test-pokemon-graphics test-input test-timer test-timer-bus
+test: test-graphics test-cpu-control test-pokemon-graphics test-input test-timer test-timer-bus test-halt test-battery
 	./test-graphics
 	./test-cpu-control
 	./test-pokemon-graphics
 	./test-input
 	./test-timer
 	./test-timer-bus
+	./test-halt
+	./test-battery
 
 test-graphics: test_graphics.cpp $(CORE) $(HEADERS)
 	$(CXX) $(CXXFLAGS) test_graphics.cpp $(CORE) -o $@
@@ -44,3 +46,9 @@ test-timer: test_timer.cpp Timer.cpp Timer.h
 
 test-timer-bus: test_timer_bus.cpp $(CORE) $(HEADERS)
 	$(CXX) $(CXXFLAGS) test_timer_bus.cpp $(CORE) -o $@
+
+test-halt: test_halt.cpp $(CORE) $(HEADERS)
+	$(CXX) $(CXXFLAGS) test_halt.cpp $(CORE) -o $@
+
+test-battery: test_battery.cpp Cartridge.cpp Cartridge.h
+	$(CXX) $(CXXFLAGS) test_battery.cpp Cartridge.cpp -o $@
