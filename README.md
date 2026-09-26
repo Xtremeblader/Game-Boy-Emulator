@@ -35,6 +35,9 @@ A C++ implementation of a Game Boy emulator, building a cycle-accurate CPU emula
   - ROM and RAM banking
   - Battery-backed RAM loading, periodic saves, and shutdown saves
 
+- **Audio**
+  - Pulse, wave, and noise channels with SDL3 stereo playback
+
 - **Peripherals**
   - **Timer**: TAC/TIMA/TMA registers with falling-edge detection
   - **Joypad**: Button input interface (D-Pad and action buttons)
@@ -47,12 +50,12 @@ A C++ implementation of a Game Boy emulator, building a cycle-accurate CPU emula
     - Palette support (BGP, OBP0, OBP1)
 
 ### In Progress 🔄
+- Audio hardware edge cases and waveform accuracy
 - Graphics timing accuracy and memory-access restrictions
 - Serial communication interface
 - Real-time clock (RTC) in MBC3 cartridges
 
 ### Planned 📋
-- Sound/Audio (APU)
 - HDMA transfers
 - Double-speed mode (CGB)
 - Full game compatibility testing
@@ -89,8 +92,8 @@ approximately 59.73 host frames per second. Keyboard input is connected. Click t
 | Escape | Close emulator |
 
 Z/X use physical key positions. Keys stay pressed until released; switching
-away from the window releases all buttons. Audio and full game compatibility
-remain unfinished. Tetris and Pokémon Red reach their title screens; press
+away from the window releases all buttons. Audio is enabled by default; full
+game compatibility remains unfinished. Tetris and Pokémon Red reach their title screens; press
 Enter to advance, then use Z to confirm choices. Full gameplay has not been verified. Battery-backed cartridge RAM is saved
 automatically as described below.
 
@@ -112,6 +115,36 @@ make headless
 including when the emulated LCD is disabled. Headless mode defaults to 60 such
 intervals. `--screenshot` saves the final framebuffer as a binary PPM image.
 The normal graphical run continues until you close it. Use `--help` for options.
+
+### Audio
+The graphical build plays 48 kHz stereo audio through SDL3 by default:
+```bash
+./emulator 'Tetris (JUE) (V1.1) [!].gb'
+./emulator 'Pokemon Red.gb'
+```
+Use `--mute` to disable playback. Headless mode never opens an audio device.
+If the device cannot be opened or audio submission fails, the emulator reports
+the error and continues muted. Use your operating system's volume controls;
+the mixer applies conservative gain.
+
+Implemented: two pulse channels with duty cycles and envelopes, channel 1
+frequency sweep, the 32-sample wave channel, 15/7-bit noise, length counters,
+NR50 volume and NR51 stereo routing, NR52 power/status, and wave RAM. The APU
+runs from CPU clock cycles, including HALT; its 512 Hz sequencer follows the
+divider and DIV resets. Samples use clock-interval averaging and a simple
+DC-removal filter. The playback queue is bounded to limit stale audio after
+host stalls.
+
+This is an initial DMG audio implementation, not a cycle-exact reproduction.
+Active wave-RAM access/corruption quirks, envelope write glitches, exact analog
+DAC/filter behavior, and CGB-specific behavior remain simplified. CPU register
+writes still occur at instruction boundaries. Game smoke tests verify nonzero,
+finite audio with all four channels used; host-speaker listening is not covered
+by automated tests. See [Pan Docs audio registers](https://gbdev.io/pandocs/Audio_Registers.html)
+for the hardware reference.
+
+`make test` includes audio pitch/sample-rate and channel tests.
+`make test-audio-sdl` exercises the output stream with SDL's dummy audio driver.
 
 ### Battery saves
 Use the game's own SAVE command first (for example, SAVE in Pokémon's menu).
@@ -186,15 +219,15 @@ Test suites are also provided for individual components:
 
 ```bash
 # Test CPU opcodes
-g++ -std=c++17 test_opcodes.cpp CPU.cpp Cartridge.cpp MMU.cpp PPU.cpp Joypad.cpp Timer.cpp -o test_opcodes
+g++ -std=c++17 test_opcodes.cpp CPU.cpp Cartridge.cpp MMU.cpp PPU.cpp Joypad.cpp Timer.cpp APU.cpp -o test_opcodes
 ./test_opcodes
 
 # Test CB-prefixed opcodes
-g++ -std=c++17 test_cb_opcodes.cpp CPU.cpp Cartridge.cpp MMU.cpp PPU.cpp Joypad.cpp Timer.cpp -o test_cb_opcodes
+g++ -std=c++17 test_cb_opcodes.cpp CPU.cpp Cartridge.cpp MMU.cpp PPU.cpp Joypad.cpp Timer.cpp APU.cpp -o test_cb_opcodes
 ./test_cb_opcodes
 
 # Test interrupt system
-g++ -std=c++17 test_interrupts.cpp CPU.cpp Cartridge.cpp MMU.cpp PPU.cpp Joypad.cpp Timer.cpp -o test_interrupts
+g++ -std=c++17 test_interrupts.cpp CPU.cpp Cartridge.cpp MMU.cpp PPU.cpp Joypad.cpp Timer.cpp APU.cpp -o test_interrupts
 ./test_interrupts
 
 # Test timer
@@ -206,7 +239,7 @@ g++ -std=c++17 test_joypad.cpp Joypad.cpp -o test_joypad
 ./test_joypad
 
 # Test ROM loading
-g++ -std=c++17 test_rom_loading.cpp MMU.cpp Cartridge.cpp PPU.cpp Joypad.cpp Timer.cpp -o test_rom_loading
+g++ -std=c++17 test_rom_loading.cpp MMU.cpp Cartridge.cpp PPU.cpp Joypad.cpp Timer.cpp APU.cpp -o test_rom_loading
 ./test_rom_loading
 ```
 
@@ -245,7 +278,7 @@ gb_emulatorproj/
 
 ## Known Limitations
 - Graphics timing and bus-access restrictions are simplified
-- No audio/sound
+- Audio hardware quirks and analog filtering are simplified
 - Limited game compatibility (mainly CPU-focused)
 - No save state support
 

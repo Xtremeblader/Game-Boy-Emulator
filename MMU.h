@@ -8,6 +8,7 @@ class Cartridge;
 class PPU;
 class Joypad;
 class Timer;
+class APU;
 
 class MMU {
 public:
@@ -19,6 +20,7 @@ public:
     Cartridge* getCartridge() const { return cartridge.get(); }
     
     void updateDMA(int cycles);
+    void linkAPU(APU* value) { apu = value; }
     void linkTimer(Timer* value) { timer = value; }
     void updateTimer(int cycles);
 
@@ -46,6 +48,7 @@ private:
     PPU* ppu = nullptr;
     Joypad* joypad = nullptr;
     Timer* timer = nullptr;
+    APU* apu = nullptr;
     int dma_index = 160;
     int dma_cycles = 0;
     uint16_t dma_source = 0;

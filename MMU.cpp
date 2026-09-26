@@ -2,6 +2,7 @@
 #include "PPU.h"
 #include "Joypad.h"
 #include "Timer.h"
+#include "APU.h"
 #include "Cartridge.h"
 #include <fstream>
 #include <iostream>
@@ -30,6 +31,7 @@ void MMU::linkInterruptRegisters(uint8_t* ie_ptr, uint8_t* if_ptr){
 }
 
 uint8_t MMU::readByte(uint16_t address) const {
+    if(apu && address >= 0xFF10 && address <= 0xFF3F) return apu->read(address);
     if(timer){
         switch(address){
             case 0xFF04: return timer->readDIV();
@@ -113,6 +115,8 @@ uint8_t MMU::readByte(uint16_t address) const {
 }
 
 void MMU::writeByte(uint16_t address, uint8_t value){
+    if(apu && address >= 0xFF10 && address <= 0xFF3F){ apu->write(address, value); return; }
+    if(apu && address == 0xFF04) apu->resetDivider();
     if(timer){
         switch(address){
             case 0xFF04: timer->writeDIV(value); return;

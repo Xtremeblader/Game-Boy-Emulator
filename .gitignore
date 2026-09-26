@@ -66,3 +66,6 @@ include/external/
 *.sav
 *.sav.tmp.*
 /test-battery
+
+/test-audio
+/test-audio-sdl-bin

@@ -4,6 +4,8 @@
 #include "Display.h"
 #include "Joypad.h"
 #include "Timer.h"
+#include "APU.h"
+#include "AudioOutput.h"
 #include "Cartridge.h"
 #include <csignal>
 #include <chrono>
@@ -18,13 +20,14 @@ void requestStop(int){ stop_requested = 1; }
 }
 
 int main(int argc, char* argv[]){
-    bool headless = false, pattern = false;
+    bool headless = false, pattern = false, mute = false;
     unsigned long long limit = 0;
     std::string rom = "Tetris (JUE) (V1.1) [!].gb", screenshot;
     try {
         for(int i = 1; i < argc; ++i){
             std::string arg = argv[i];
             if(arg == "--headless") headless = true;
+            else if(arg == "--mute") mute = true;
             else if(arg == "--test-pattern") pattern = true;
             else if(arg == "--frames" && i + 1 < argc){
                 std::string number = argv[++i];
@@ -34,7 +37,7 @@ int main(int argc, char* argv[]){
                 if(!limit) throw std::invalid_argument("frames");
             } else if(arg == "--screenshot" && i + 1 < argc) screenshot = argv[++i];
             else if(arg == "--help"){
-                std::cout << "Usage: emulator [ROM] [--headless] [--frames N] [--test-pattern] [--screenshot image.ppm]\n";
+                std::cout << "Usage: emulator [ROM] [--headless] [--mute] [--frames N] [--test-pattern] [--screenshot image.ppm]\n";
                 return 0;
             } else if(arg.rfind("--", 0) == 0) throw std::invalid_argument(arg);
             else rom = arg;
@@ -49,6 +52,8 @@ int main(int argc, char* argv[]){
     PPU ppu(mmu);
     Joypad joypad;
     Timer timer;
+    APU apu;
+    mmu.linkAPU(&apu);
     mmu.linkTimer(&timer);
     mmu.linkJoypad(&joypad);
     mmu.linkPPU(&ppu);
@@ -67,6 +72,12 @@ int main(int argc, char* argv[]){
         std::cerr << "Display error: " << display.error() << '\n';
         return 1;
     }
+    AudioOutput audio;
+    bool audio_enabled = !headless && !mute;
+    if(audio_enabled && !audio.open()){
+        std::cerr << "Audio unavailable: " << audio.error() << ". Continuing muted.\n";
+        audio_enabled = false;
+    }
     using Clock = std::chrono::steady_clock;
     auto deadline = Clock::now();
     const auto frame_time = std::chrono::duration_cast<Clock::duration>(
@@ -82,6 +93,7 @@ int main(int argc, char* argv[]){
             int elapsed = pattern ? 4 : cpu.step();
             if(elapsed <= 0){ std::cerr << "CPU returned invalid timing\n"; return 1; }
             mmu.updateTimer(elapsed);
+            apu.update(elapsed);
             mmu.updateDMA(elapsed);
             ppu.update(elapsed);
             cycles += elapsed;
@@ -101,6 +113,11 @@ int main(int argc, char* argv[]){
                 }
                 ppu.resetFrameReady();
             }
+        }
+        auto samples = apu.takeSamples();
+        if(audio_enabled && !audio.queue(samples)){
+            std::cerr << "Audio output failed: " << audio.error() << ". Continuing muted.\n";
+            audio_enabled = false;
         }
         ++frames;
         if(frames % 300 == 0 && mmu.getCartridge() && !mmu.getCartridge()->saveBattery()) return 1;
